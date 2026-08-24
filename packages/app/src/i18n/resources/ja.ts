@@ -619,6 +619,7 @@ export const ja: TranslationResources = {
       hostDisconnected: "ホストが接続されていません",
       updateHost: "ネイティブターミナルを使用するにはホストを更新してください。",
       unableToSubscribe: "ターミナルに接続できません",
+      pasteImageFailed: "画像を貼り付けられませんでした",
     },
     sheet: {
       openAsTab: "タブで開く",
