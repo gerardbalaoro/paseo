@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "fork": "gerardbalaoro/paseo",
+  "upstream": "getpaseo/paseo",
+  "patches": [
+    {
+      "id": "terminal-image-paste",
+      "branch": "feat/terminal-image-paste",
+      "pr": 3795,
+      "owner": "gerardbalaoro",
+      "writer": "external",
+      "preserve": { ".qa/image-paste-capture.png": "a67762c640d5cd03767df57a0b395ce0afabbf91" }
+    }
+  ]
+}

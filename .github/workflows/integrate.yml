@@ -1,0 +1,98 @@
+name: Fork integration
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 2 * * *"
+permissions:
+  contents: read
+concurrency:
+  group: fork-integration
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.repository == 'gerardbalaoro/paseo' && github.ref == 'refs/heads/automation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -v
+      - name: Prepare integration without changing remote branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/integrate.py build --repo "$RUNNER_TEMP/candidate" --plan plan.json
+          git -C "$RUNNER_TEMP/candidate" branch candidate HEAD
+          git -C "$RUNNER_TEMP/candidate" bundle create "$GITHUB_WORKSPACE/candidate.bundle" --all
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prepared-integration
+          path: |
+            plan.json
+            candidate.bundle
+          retention-days: 7
+  validate:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: prepared-integration
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Validate the exact prepared monorepo
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
+        run: |
+          git clone candidate.bundle "$RUNNER_TEMP/candidate"
+          git -C "$RUNNER_TEMP/candidate" checkout --detach "$(python3 -c 'import json; print(json.load(open("plan.json"))["candidate"])')"
+          cd "$RUNNER_TEMP/candidate"
+          bash "$GITHUB_WORKSPACE/scripts/validate.sh"
+  publish:
+    needs: [prepare, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: prepared-integration
+      - name: Publish guarded transaction with built-in token only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INTEGRATION_BUILTIN_TOKEN: "true"
+        run: |
+          git clone candidate.bundle "$RUNNER_TEMP/candidate"
+          git -C "$RUNNER_TEMP/candidate" checkout --detach "$(python3 -c 'import json; print(json.load(open("plan.json"))["candidate"])')"
+          # Process-only authentication. No PAT, persistent credential setup, tags,
+          # release dispatches, or inherited workflows. Built-in-token pushes do not
+          # trigger push workflows, including upstream's deploy/main mutation jobs.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          python3 scripts/integrate.py publish --repo "$RUNNER_TEMP/candidate" --plan plan.json
+  report:
+    needs: [prepare, validate, publish]
+    if: always() && github.repository == 'gerardbalaoro/paseo' && github.ref == 'refs/heads/automation' && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: python3 scripts/report_failure.py
+        env:
+          GH_TOKEN: ${{ github.token }}
