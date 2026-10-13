@@ -7339,7 +7339,11 @@ export class Session {
       if (!terminal || !this.terminalManager)
         throw new Error("A live terminalId is required for image paste");
       const modes = new TerminalInputModeTracker();
-      modes.feed(terminal.getReplayPreamble());
+      const snapshot = await this.terminalManager.getTerminalState(terminal.id, {
+        scrollbackLines: 0,
+      });
+      if (!snapshot) throw new Error("Terminal closed before image paste completed");
+      modes.feed(snapshot.replayPreamble ?? terminal.getReplayPreamble());
       if (!modes.getState().bracketedPaste) {
         throw new Error("Image paste requires an agent that accepts bracketed file paste");
       }
@@ -7351,11 +7355,7 @@ export class Session {
       if (this.terminalManager.getTerminal(terminal.id) !== terminal || terminal.getExitInfo()) {
         throw new Error("Terminal closed before image paste completed");
       }
-      modes.reset();
-      modes.feed(terminal.getReplayPreamble());
-      if (!modes.getState().bracketedPaste)
-        throw new Error("Terminal stopped accepting file paste");
-      terminal.send({ type: "input", data: `\x1b[200~${terminalImageReference(path)}\x1b[201~` });
+      await terminal.paste(terminalImageReference(path));
       this.emit({
         type: "terminal.clipboard.write_image.response",
         payload: { requestId: request.requestId, success: true, injected: true, error: null },

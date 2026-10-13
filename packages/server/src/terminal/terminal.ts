@@ -104,6 +104,7 @@ export interface TerminalSession {
   cwd: string;
   workspaceId: string;
   send(msg: ClientMessage): void;
+  paste(text: string): Promise<void>;
   subscribe(listener: (msg: ServerMessage) => void, options?: TerminalSubscribeOptions): () => void;
   onExit(listener: (info: TerminalExitInfo) => void): () => void;
   onCommandFinished(listener: (info: TerminalCommandFinishedInfo) => void): () => void;
@@ -1392,6 +1393,18 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     });
   }
 
+  async function paste(text: string): Promise<void> {
+    if (killed || disposed || exitInfo) {
+      throw new Error("Terminal closed before image paste completed");
+    }
+    if (!inputModeTracker.getState().bracketedPaste) {
+      throw new Error("Terminal stopped accepting file paste");
+    }
+    // Keep the check and PTY write in the same turn, after earlier queued input.
+    flushPendingInput();
+    writeInputToPty(`\x1b[200~${text}\x1b[201~`);
+  }
+
   function send(msg: ClientMessage): void {
     if (killed) return;
 
@@ -1628,6 +1641,7 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     cwd,
     workspaceId,
     send,
+    paste,
     subscribe,
     onExit,
     onCommandFinished,

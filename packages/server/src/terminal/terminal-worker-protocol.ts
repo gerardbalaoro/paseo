@@ -91,6 +91,12 @@ export type TerminalWorkerRequest =
       requestId: string;
     }
   | {
+      type: "paste";
+      requestId: string;
+      terminalId: string;
+      text: string;
+    }
+  | {
       type: "send";
       requestId: string;
       terminalId: string;
