@@ -475,16 +475,16 @@ class TerminalWebViewBridge {
     input: TerminalImagePasteInput,
   ): Promise<TerminalImagePasteOutcome> {
     const requestId = this.nextImagePasteRequestId++;
-    const { promise, resolve } = Promise.withResolvers<TerminalImagePasteOutcome>();
-    this.pendingImagePasteResolutions.set(requestId, resolve);
-    sendToNative({
-      type: "imagePaste",
-      streamKey,
-      requestId,
-      data: input.data,
-      mimeType: input.mimeType,
+    return new Promise((resolve) => {
+      this.pendingImagePasteResolutions.set(requestId, resolve);
+      sendToNative({
+        type: "imagePaste",
+        streamKey,
+        requestId,
+        data: input.data,
+        mimeType: input.mimeType,
+      });
     });
-    return promise;
   }
 
   private resolveImagePasteRequest(requestId: number, outcome: TerminalImagePasteOutcome): void {

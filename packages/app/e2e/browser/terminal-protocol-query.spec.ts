@@ -37,8 +37,10 @@ const { fileURLToPath } = require('node:url');
 let pending = '', imagePath;
 process.stdin.setRawMode(true);
 process.stdin.resume();
-process.stdout.write('\\x1b[?2004hIMAGE_RECEIVER_READY\\r\\n');
+process.stdout.write('IMAGE_RECEIVER_READY\\r\\n');
 process.stdin.on('data', chunk => {
+  if (chunk.toString() === 'e') { process.stdout.write('\\x1b[?2004hIMAGE_ENABLED\\r\\n'); return; }
+  if (chunk.toString() === 'd') { process.stdout.write('\\x1b[?2004lIMAGE_DISABLED\\r\\n'); return; }
   pending += chunk.toString();
   const end = pending.indexOf('\\x1b[201~');
   if (end >= 0) {
@@ -83,6 +85,14 @@ async function pasteImageInTerminal(
 ) {
   await harness.openTerminal(target, { terminalId: terminalId });
   await expectCapturedImageOutput(harness, terminalId, "IMAGE_RECEIVER_READY");
+  // Change modes after attachment: a replay-time cache still says disabled.
+  harness.client.sendTerminalInput(terminalId, { type: "input", data: "e" });
+  await expectCapturedImageOutput(harness, terminalId, "IMAGE_ENABLED");
+  await dispatchImagePaste(target, payload);
+  await expectCapturedImageOutput(harness, terminalId, "IMAGE_STAGED");
+}
+
+async function dispatchImagePaste(target: Page, payload: Buffer) {
   await target.locator('[data-testid="terminal-surface"] .xterm-helper-textarea').evaluate(
     (element, bytes) => {
       const clipboardData = new DataTransfer();
@@ -95,7 +105,6 @@ async function pasteImageInTerminal(
     },
     [...payload],
   );
-  await expectCapturedImageOutput(harness, terminalId, "IMAGE_STAGED");
 }
 
 test.describe("Terminal protocol queries", () => {
@@ -156,6 +165,14 @@ test.describe("Terminal protocol queries", () => {
         pasteImageInTerminal(page, harness, terminals[0]!.id, payloads[0]!),
         pasteImageInTerminal(secondPage, harness, terminals[1]!.id, payloads[1]!),
       ]);
+      harness.client.sendTerminalInput(terminals[0]!.id, { type: "input", data: "d" });
+      await expectCapturedImageOutput(harness, terminals[0]!.id, "IMAGE_DISABLED");
+      await dispatchImagePaste(page, payloads[0]!);
+      await expect(
+        page.getByText("Image paste requires an agent that accepts bracketed file paste", {
+          exact: true,
+        }),
+      ).toBeVisible();
       await page.reload();
       await harness.openTerminal(page, { terminalId: terminals[0]!.id });
       await expectCapturedImageOutput(harness, terminals[0]!.id, "IMAGE_STAGED");

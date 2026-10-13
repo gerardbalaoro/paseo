@@ -272,6 +272,12 @@ export function createWorkerTerminalManager(
         }
         sendBestEffortRequest({ type: "send", terminalId: record.info.id, message });
       },
+      async paste(text: string): Promise<void> {
+        if (recordsById.get(record.info.id) !== record || record.exitInfo) {
+          throw new Error("Terminal closed before image paste completed");
+        }
+        await sendRequest({ type: "paste", terminalId: record.info.id, text });
+      },
       subscribe(
         listener: (msg: ServerMessage) => void,
         options?: { initialSnapshot?: "state" | "ready" },

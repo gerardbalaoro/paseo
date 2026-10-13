@@ -324,6 +324,14 @@ async function handleRequest(message: TerminalWorkerRequest): Promise<void> {
       return;
     }
 
+    case "paste": {
+      const session = manager.getTerminal(message.terminalId);
+      if (!session) throw new Error("Terminal closed before image paste completed");
+      await session.paste(message.text);
+      sendToParent({ type: "response", requestId: message.requestId, ok: true });
+      return;
+    }
+
     case "send": {
       const session = manager.getTerminal(message.terminalId);
       session?.send(message.message);

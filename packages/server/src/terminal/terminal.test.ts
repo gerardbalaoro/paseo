@@ -1574,3 +1574,27 @@ it.runIf(isPlatform("linux", "darwin"))(
     ).rejects.toThrow(" node : command not found");
   },
 );
+it("flushes preceding input before checked paste and preserves following input", async () => {
+  const session = trackSession(
+    await createTerminal({
+      cwd: tmpdir(),
+      workspaceId: "ws-test",
+      command: process.execPath,
+      args: [
+        "-e",
+        `process.stdin.setRawMode(true); let received = "";
+      process.stdout.write("\\x1b[?2004hREADY");
+      process.stdin.on("data", data => { received += data.toString("hex"); process.stdout.write("\\r\\nHEX:" + received + "\\r\\n"); });`,
+      ],
+      cols: 200,
+      rows: 20,
+    }),
+  );
+  await waitForState(session, (state) => getLines(state).some((line) => line.includes("READY")));
+  session.send({ type: "input", data: "before" });
+  const pasted = session.paste("image.png");
+  session.send({ type: "input", data: "after" });
+  await pasted;
+  const expected = "HEX:" + Buffer.from("before\x1b[200~image.png\x1b[201~after").toString("hex");
+  await waitForState(session, (state) => getLines(state).some((line) => line.includes(expected)));
+});
