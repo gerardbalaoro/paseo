@@ -1,3 +1,4 @@
+import { TerminalImageError } from "@getpaseo/protocol/terminal-image-error";
 import { TerminalFileLifecycle } from "./terminal-file-lifecycle.js";
 import { fileURLToPath } from "node:url";
 import { fork } from "node:child_process";
@@ -273,7 +274,10 @@ export function createWorkerTerminalManager(
       },
       async paste(text: string): Promise<void> {
         if (recordsById.get(record.info.id) !== record || record.exitInfo) {
-          throw new Error("Terminal closed before image paste completed");
+          throw new TerminalImageError(
+            "terminal_closed",
+            "Terminal closed before image paste completed",
+          );
         }
         await sendRequest({ type: "paste", terminalId: record.info.id, text });
       },
@@ -609,7 +613,11 @@ export function createWorkerTerminalManager(
       if (message.ok) {
         pending.resolve(message.result);
       } else {
-        pending.reject(new Error(message.error));
+        pending.reject(
+          message.imageErrorCode
+            ? new TerminalImageError(message.imageErrorCode, message.error)
+            : new Error(message.error),
+        );
       }
       return;
     }

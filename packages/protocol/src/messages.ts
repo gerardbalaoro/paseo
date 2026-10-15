@@ -3104,6 +3104,16 @@ export const CaptureTerminalRequestSchema = z.object({
 
 // Transfers image bytes to the terminal's host. With terminalImageFiles, the
 // daemon stages a private file and injects its reference into the bound PTY.
+export const TerminalClipboardCancelImageRequestSchema = z.object({
+  type: z.literal("terminal.clipboard.cancel_image.request"),
+  requestId: z.string(),
+  targetRequestId: z.string(),
+});
+export const TerminalClipboardCancelImageResponseSchema = z.object({
+  type: z.literal("terminal.clipboard.cancel_image.response"),
+  payload: z.object({ requestId: z.string(), success: z.boolean() }),
+});
+
 export const TerminalClipboardWriteImageRequestSchema = z.object({
   type: z.literal("terminal.clipboard.write_image.request"),
   requestId: z.string(),
@@ -3437,6 +3447,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   KillTerminalRequestSchema,
   CaptureTerminalRequestSchema,
   TerminalClipboardWriteImageRequestSchema,
+  TerminalClipboardCancelImageRequestSchema,
   ChatCreateRequestSchema,
   ChatListRequestSchema,
   ChatInspectRequestSchema,
@@ -3709,6 +3720,7 @@ export const ServerInfoStatusPayloadSchema = z
         // COMPAT(terminalClipboardImage): added in v0.5.1, remove gate after 2027-08-24.
         terminalClipboardImage: z.boolean().optional(),
         terminalImageFiles: z.boolean().optional(),
+        terminalImagePasteSequencing: z.boolean().optional(),
         // COMPAT(terminalInputModeReplay): added in v0.2.6, remove gate after 2027-02-02.
         "terminal-input-mode-replay": z.boolean().optional(),
         // COMPAT(terminalSizeOwnership): added in v0.2.6, remove gate after 2027-02-02.
@@ -6585,6 +6597,16 @@ export const TerminalClipboardWriteImageResponseSchema = z.object({
     success: z.boolean(),
     injected: z.boolean().optional(),
     error: z.string().nullable(),
+    errorCode: z
+      .enum([
+        "disk_full",
+        "quota_exceeded",
+        "terminal_closed",
+        "unsupported_mode",
+        "invalid_image",
+        "upload_failed",
+      ])
+      .optional(),
     // Retained for wire compatibility with older clipboard/path hosts.
     path: z.string().optional(),
   }),
@@ -7155,6 +7177,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   KillTerminalResponseSchema,
   CaptureTerminalResponseSchema,
   TerminalClipboardWriteImageResponseSchema,
+  TerminalClipboardCancelImageResponseSchema,
   TerminalStreamExitSchema,
   TerminalAttentionRequiredSchema,
   ChatCreateResponseSchema,

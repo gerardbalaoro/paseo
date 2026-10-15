@@ -1,3 +1,4 @@
+import { TerminalPasteQueue } from "@getpaseo/protocol/terminal-paste-queue";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
@@ -89,6 +90,7 @@ export interface TerminalEmulatorRuntimeCallbacks {
   ) => Promise<void> | void;
   onInputModeChange?: (state: TerminalInputModeState) => Promise<void> | void;
   onImagePaste?: (input: TerminalImagePasteInput) => Promise<TerminalImagePasteOutcome>;
+  onPasteFailure?: () => void;
 }
 
 export interface TerminalResizeEvent {
@@ -220,12 +222,25 @@ async function readClipboardImageFromTransfer(
   return null;
 }
 
-async function readClipboardImageFromNavigator(): Promise<TerminalImagePasteInput | null> {
-  const clipboard = navigator.clipboard as Clipboard & { read?: () => Promise<ClipboardItem[]> };
+export interface TerminalClipboard {
+  readText(): Promise<string>;
+  read?(): Promise<readonly Pick<ClipboardItem, "types" | "getType">[]>;
+  writeText(text: string): Promise<void>;
+}
+
+const browserClipboard: TerminalClipboard = {
+  readText: () => navigator.clipboard.readText(),
+  read: () => navigator.clipboard.read(),
+  writeText: (text) => navigator.clipboard.writeText(text),
+};
+
+async function readClipboardImageFromNavigator(
+  clipboard: TerminalClipboard,
+): Promise<TerminalImagePasteInput | null> {
   if (!clipboard || typeof clipboard.read !== "function") {
     return null;
   }
-  let items: ClipboardItem[];
+  let items: readonly Pick<ClipboardItem, "types" | "getType">[];
   try {
     items = await clipboard.read();
   } catch {
@@ -250,9 +265,16 @@ async function readClipboardImageFromNavigator(): Promise<TerminalImagePasteInpu
 }
 
 export class TerminalEmulatorRuntime {
-  constructor(private readonly options: FindShortcutPlatform = { isMac: isMacUserAgent() }) {}
+  constructor(
+    private readonly options: FindShortcutPlatform = { isMac: isMacUserAgent() },
+    private readonly clipboard: TerminalClipboard = browserClipboard,
+  ) {}
 
   private callbacks: TerminalEmulatorRuntimeCallbacks = {};
+  private pasteInputBypass = false;
+  private readonly pasteQueue = new TerminalPasteQueue({
+    onFailure: () => this.callbacks.onPasteFailure?.(),
+  });
   private pendingModifiers: PendingTerminalModifiers = {
     ctrl: false,
     shift: false,
@@ -396,7 +418,7 @@ export class TerminalEmulatorRuntime {
 
         // Ctrl+C: copy selection to clipboard if text is selected, otherwise let xterm send SIGINT
         if (key === "c" && terminal.hasSelection()) {
-          void navigator.clipboard.writeText(terminal.getSelection());
+          void this.clipboard.writeText(terminal.getSelection());
           return false;
         }
 
@@ -441,9 +463,13 @@ export class TerminalEmulatorRuntime {
         altKey: event.altKey,
         metaKey: event.metaKey,
       });
-      this.callbacks.onTerminalKey?.({
-        key: normalizeTerminalTransportKey(normalizedKey),
-        ...modifiers,
+      if (normalizedKey.toLowerCase() === "c" && modifiers.ctrl) this.pasteQueue.cancel();
+      this.pasteQueue.action((failed) => {
+        if (failed && normalizedKey === "Enter") return;
+        void this.callbacks.onTerminalKey?.({
+          key: normalizeTerminalTransportKey(normalizedKey),
+          ...modifiers,
+        });
       });
 
       if (hasPendingTerminalModifiers(this.pendingModifiers)) {
@@ -725,7 +751,13 @@ export class TerminalEmulatorRuntime {
       if (this.suppressInput) {
         return;
       }
-      this.callbacks.onInput?.(data);
+      if (this.pasteInputBypass) {
+        void this.callbacks.onInput?.(data);
+        return;
+      }
+      this.pasteQueue.input(data, (value) => {
+        void this.callbacks.onInput?.(value);
+      });
     });
 
     this.attachKeyEventHandler(terminal);
@@ -747,10 +779,16 @@ export class TerminalEmulatorRuntime {
       }
       event.preventDefault();
       event.stopPropagation();
-      void this.forwardClipboardImage({
-        readImage: () => readClipboardImageFromTransfer(transfer),
-        input: (data) => terminal.input(data),
-      });
+      const image = readClipboardImageFromTransfer(transfer);
+      void this.pasteQueue.paste((signal) =>
+        this.forwardClipboardImage({
+          readImage: () => image,
+          input: (data) => {
+            void this.callbacks.onInput?.(data);
+          },
+          signal,
+        }),
+      );
     };
     input.host.addEventListener("paste", hostPasteHandler, true);
 
@@ -917,6 +955,10 @@ export class TerminalEmulatorRuntime {
   }
 
   /** Feeds raw bytes (e.g. the \x16 image-paste keystroke) directly into xterm. */
+  cancelPaste(): void {
+    this.pasteQueue.dispose();
+  }
+
   inputRaw(data: string): void {
     if (data.length === 0) {
       return;
@@ -924,40 +966,53 @@ export class TerminalEmulatorRuntime {
     this.terminal?.input(data);
   }
 
-  private async pasteClipboardTextOrImage(
-    terminal: Pick<Terminal, "paste" | "input">,
-  ): Promise<void> {
-    const text = await navigator.clipboard.readText().catch(() => "");
-    if (text.length > 0) {
-      terminal.paste(text);
-      return;
-    }
-    await this.forwardClipboardImage({
-      readImage: readClipboardImageFromNavigator,
-      input: (data) => terminal.input(data),
+  private async pasteClipboardTextOrImage(terminal: Pick<Terminal, "paste">): Promise<void> {
+    // Capture each gesture now, even when an earlier image is still uploading.
+    const readText = (async () => this.clipboard.readText())().catch(() => "");
+    const readImage = this.callbacks.onImagePaste
+      ? readClipboardImageFromNavigator(this.clipboard)
+      : Promise.resolve(null);
+    await this.pasteQueue.paste(async (signal) => {
+      const text = await readText;
+      if (signal.aborted) return false;
+      if (text.length > 0) {
+        // xterm owns text normalization and bracketed-paste encoding. Its input
+        // callback is synchronous, so only this paste bypasses the queue.
+        this.pasteInputBypass = true;
+        try {
+          terminal.paste(text);
+        } finally {
+          this.pasteInputBypass = false;
+        }
+        return true;
+      }
+      return this.forwardClipboardImage({
+        readImage: () => readImage,
+        input: (data) => {
+          void this.callbacks.onInput?.(data);
+        },
+        signal,
+      });
     });
   }
 
-  /**
-   * Ships clipboard image bytes to the onImagePaste callback when one is
-   * registered, then decides whether the raw keystroke still needs forwarding.
-   * Without bytes or a callback, today's bare \x16 fallback applies so agent
-   * TUIs keep reading the OS clipboard themselves.
-   */
   private async forwardClipboardImage(input: {
     readImage: () => Promise<TerminalImagePasteInput | null>;
     input: (data: string) => void;
-  }): Promise<void> {
+    signal: AbortSignal;
+  }): Promise<boolean> {
     const onImagePaste = this.callbacks.onImagePaste;
     const image = onImagePaste ? await input.readImage().catch(() => null) : null;
+    if (input.signal.aborted) return false;
     if (!onImagePaste || !image) {
       input.input(TERMINAL_IMAGE_PASTE_KEYSTROKE);
-      return;
+      return true;
     }
     const outcome = await onImagePaste(image).catch(() => "error" as const);
-    if (outcome === "written" || outcome === "unsupported") {
+    if (input.signal.aborted) return false;
+    if (outcome === "written" || outcome === "unsupported")
       input.input(TERMINAL_IMAGE_PASTE_KEYSTROKE);
-    }
+    return outcome !== "error";
   }
 
   renderSnapshot(input: { state: TerminalState | null; onCommitted?: () => void }): void {
@@ -1094,6 +1149,7 @@ export class TerminalEmulatorRuntime {
   }
 
   unmount(): void {
+    this.pasteQueue.dispose();
     this.releaseFindOutputAnchor();
     this.clearInFlightOutputTimeout();
     const inFlightOperation = this.inFlightOutputOperation;

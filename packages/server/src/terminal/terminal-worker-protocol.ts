@@ -1,3 +1,4 @@
+import type { TerminalImageErrorCode } from "@getpaseo/protocol/terminal-image-error";
 import type {
   TerminalExitInfo,
   ServerMessage,
@@ -115,6 +116,7 @@ export type TerminalWorkerResponse =
       requestId: string;
       ok: false;
       error: string;
+      imageErrorCode?: TerminalImageErrorCode;
     };
 
 export type TerminalWorkerEvent =

@@ -1,6 +1,5 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
-import * as fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,12 +11,6 @@ import {
   terminalImageFileSystem,
 } from "./host-clipboard.js";
 
-// Inject failures only at filesystem boundaries; all storage remains real.
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, rename: vi.fn(actual.rename), readFile: vi.fn(actual.readFile) };
-});
-
 const roots: string[] = [];
 const PNG = Buffer.from("89504e470d0a1a0a", "hex");
 const payload = (terminalId: string, suffix = "") => ({
@@ -26,7 +19,6 @@ const payload = (terminalId: string, suffix = "") => ({
   dataBase64: Buffer.concat([PNG, Buffer.from(suffix)]).toString("base64"),
 });
 afterEach(async () => {
-  vi.restoreAllMocks();
   await Promise.all(
     roots.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
@@ -242,8 +234,13 @@ describe("terminal image storage", () => {
     const ownerPath = join(dirname(original), "terminal.json");
     await writeFile(ownerPath, "{");
     const failure = Object.assign(new Error("rename failed"), { code: "EIO" });
-    vi.spyOn(fs, "rename").mockRejectedValueOnce(failure);
-    await expect(createStore(options).save(payload("a"))).rejects.toBe(failure);
+    const filesystem = {
+      ...terminalImageFileSystem,
+      rename: async () => {
+        throw failure;
+      },
+    };
+    await expect(createStore({ ...options, filesystem }).save(payload("a"))).rejects.toBe(failure);
     expect(await readFile(ownerPath, "utf8")).toBe("{");
     expect(await readFile(original)).toEqual(PNG);
     expect((await readdir(dirname(original))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
@@ -256,8 +253,15 @@ describe("terminal image storage", () => {
     const store = createStore({ directory, isActive: () => true });
     await store.save(payload("a"));
     const failure = Object.assign(new Error("permission denied"), { code: "EACCES" });
-    vi.spyOn(fs, "readFile").mockRejectedValueOnce(failure);
-    await expect(store.save(payload("a"))).rejects.toBe(failure);
+    const filesystem = {
+      ...terminalImageFileSystem,
+      readFile: async () => {
+        throw failure;
+      },
+    };
+    await expect(
+      createStore({ directory, isActive: () => true, filesystem }).save(payload("a")),
+    ).rejects.toBe(failure);
   });
 
   test("rejects closed terminals and invalid/oversized images", async () => {

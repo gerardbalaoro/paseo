@@ -1,3 +1,4 @@
+import { TerminalImageError } from "@getpaseo/protocol/terminal-image-error";
 import * as pty from "node-pty";
 import xterm, { type Terminal as TerminalType } from "@xterm/headless";
 import { randomUUID } from "crypto";
@@ -1395,10 +1396,13 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
 
   async function paste(text: string): Promise<void> {
     if (killed || disposed || exitInfo) {
-      throw new Error("Terminal closed before image paste completed");
+      throw new TerminalImageError(
+        "terminal_closed",
+        "Terminal closed before image paste completed",
+      );
     }
     if (!inputModeTracker.getState().bracketedPaste) {
-      throw new Error("Terminal stopped accepting file paste");
+      throw new TerminalImageError("unsupported_mode", "Terminal stopped accepting file paste");
     }
     // Keep the check and PTY write in the same turn, after earlier queued input.
     flushPendingInput();

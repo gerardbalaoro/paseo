@@ -1,3 +1,4 @@
+import { TerminalImageError } from "@getpaseo/protocol/terminal-image-error";
 import type { Dirent } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
@@ -174,7 +175,9 @@ export class TerminalImageStore {
       .then(() => this.saveImage(input))
       .catch((error: unknown) => {
         if ((error as NodeJS.ErrnoException).code === "ENOSPC")
-          throw new Error("Host disk is full; cannot upload the image", { cause: error });
+          throw new TerminalImageError("disk_full", "Host disk is full; cannot upload the image", {
+            cause: error,
+          });
         throw error;
       });
     this.uploads.set(key, operation);
@@ -190,7 +193,7 @@ export class TerminalImageStore {
     const bytes = decodeImage(input);
     await this.initialize();
     if (this.stopped || !this.options.isActive(input.terminalId))
-      throw new Error("Terminal no longer exists");
+      throw new TerminalImageError("terminal_closed", "Terminal no longer exists");
     const key = terminalFileKey(input.terminalId);
     const usage = this.usage.get(key) ?? { bytes: 0, files: 0, uploads: 0 };
     this.usage.set(key, usage);
@@ -211,7 +214,10 @@ export class TerminalImageStore {
         usage.bytes + bytes.length > (this.options.maxTerminalBytes ?? 64 * 1024 * 1024) ||
         this.files >= (this.options.maxFiles ?? 1024)
       )
-        throw new Error("Terminal image storage limit reached; retained images were not deleted");
+        throw new TerminalImageError(
+          "quota_exceeded",
+          "Terminal image storage limit reached; retained images were not deleted",
+        );
       // No await between checking and reserving the shared limits.
       this.bytes += bytes.length;
       this.files++;
@@ -411,15 +417,20 @@ async function privateDirectory(path: string, files = terminalImageFileSystem): 
 
 function decodeImage(input: TerminalImageInput): Buffer {
   if (input.dataBase64.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4) {
-    throw new Error("Clipboard image too large: limit is 10 MiB");
+    throw new TerminalImageError("invalid_image", "Clipboard image too large: limit is 10 MiB");
   }
   const bytes = Buffer.from(input.dataBase64, "base64");
-  if (bytes.toString("base64") !== input.dataBase64) throw new Error("Invalid image encoding");
+  if (bytes.toString("base64") !== input.dataBase64)
+    throw new TerminalImageError("invalid_image", "Invalid image encoding");
   const signature = input.mimeType === "image/png" ? "89504e470d0a1a0a" : "ffd8ff";
   if (!bytes.subarray(0, signature.length / 2).equals(Buffer.from(signature, "hex"))) {
-    throw new Error("Clipboard payload does not match its image type");
+    throw new TerminalImageError(
+      "invalid_image",
+      "Clipboard payload does not match its image type",
+    );
   }
-  if (bytes.length > MAX_IMAGE_BYTES) throw new Error("Clipboard image too large: limit is 10 MiB");
+  if (bytes.length > MAX_IMAGE_BYTES)
+    throw new TerminalImageError("invalid_image", "Clipboard image too large: limit is 10 MiB");
   return bytes;
 }
 

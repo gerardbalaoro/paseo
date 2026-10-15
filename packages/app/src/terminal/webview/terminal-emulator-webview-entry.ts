@@ -55,6 +55,7 @@ type InboundMessage =
       target: TerminalLocalFileLinkTarget | null;
     }
   | { type: "rawInput"; streamKey: string; data: string }
+  | { type: "cancelPaste"; streamKey: string }
   | {
       type: "imagePasteResult";
       streamKey: string;
@@ -66,6 +67,7 @@ type OutboundMessage =
   | { type: "bridgeReady" }
   | { type: "rendererReady"; streamKey: string; isReady: boolean }
   | { type: "input"; streamKey: string; data: string }
+  | { type: "pasteFailure"; streamKey: string }
   | { type: "findRequest"; streamKey: string }
   | { type: "findResult"; streamKey: string; result: TerminalFindResult }
   | {
@@ -274,13 +276,33 @@ class TerminalWebViewBridge {
     this.receiveMounted(message);
   }
 
+  private receivePasteMessage(message: InboundMessage): boolean {
+    switch (message.type) {
+      case "paste":
+        this.runtime?.paste(message.text);
+        return true;
+      case "cancelPaste":
+        this.runtime?.cancelPaste();
+        this.resolveAllImagePasteRequests("error");
+        return true;
+      case "rawInput":
+        this.runtime?.inputRaw(message.data);
+        return true;
+      case "imagePasteResult":
+        this.resolveImagePasteRequest(message.requestId, message.outcome);
+        return true;
+      default:
+        return false;
+    }
+  }
+
   private receiveMounted(
     message: Exclude<
       InboundMessage,
       MountMessage | { type: "unmount" } | { type: "resolveLocalFileLinkResponse" }
     >,
   ): void {
-    if (this.receiveConfigurationMessage(message)) return;
+    if (this.receiveConfigurationMessage(message) || this.receivePasteMessage(message)) return;
 
     switch (message.type) {
       case "writeOutput":
@@ -291,15 +313,6 @@ class TerminalWebViewBridge {
         break;
       case "renderSnapshot":
         this.runtime?.renderSnapshot({ state: message.state });
-        break;
-      case "paste":
-        this.runtime?.paste(message.text);
-        break;
-      case "rawInput":
-        this.runtime?.inputRaw(message.data);
-        break;
-      case "imagePasteResult":
-        this.resolveImagePasteRequest(message.requestId, message.outcome);
         break;
       case "clear":
         this.runtime?.clear();
@@ -359,6 +372,7 @@ class TerminalWebViewBridge {
           sendToNative({ type: "findResult", streamKey: message.streamKey, result }),
         onInput: (data) => sendToNative({ type: "input", streamKey: message.streamKey, data }),
         onImagePaste: (input) => this.requestImagePaste(message.streamKey, input),
+        onPasteFailure: () => sendToNative({ type: "pasteFailure", streamKey: message.streamKey }),
         onResize: ({ rows, cols, shouldClaim, forceClaim }) =>
           sendToNative({
             type: "resize",
@@ -475,7 +489,8 @@ class TerminalWebViewBridge {
     input: TerminalImagePasteInput,
   ): Promise<TerminalImagePasteOutcome> {
     const requestId = this.nextImagePasteRequestId++;
-    return new Promise((resolve) => {
+    const timer = setTimeout(() => this.resolveImagePasteRequest(requestId, "error"), 30_000);
+    return new Promise<TerminalImagePasteOutcome>((resolve) => {
       this.pendingImagePasteResolutions.set(requestId, resolve);
       sendToNative({
         type: "imagePaste",
@@ -484,7 +499,7 @@ class TerminalWebViewBridge {
         data: input.data,
         mimeType: input.mimeType,
       });
-    });
+    }).finally(() => clearTimeout(timer));
   }
 
   private resolveImagePasteRequest(requestId: number, outcome: TerminalImagePasteOutcome): void {
