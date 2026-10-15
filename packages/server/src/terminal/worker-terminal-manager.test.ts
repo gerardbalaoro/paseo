@@ -1192,3 +1192,137 @@ it("reports paste acknowledgement timeouts and worker disconnects", async () => 
   worker.disconnect();
   await rejected;
 });
+
+it("releases a missing-executable reservation and retires a successful same-ID retry", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "worker-create-retry-"));
+  temporaryDirs.push(cwd);
+  manager = createWorkerTerminalManager();
+  const id = "failed-start-retry";
+  const key = terminalFileKey(id);
+  await expect(
+    manager.createTerminal({
+      id,
+      cwd,
+      workspaceId: "ws-test",
+      command: join(cwd, "absent-executable"),
+    }),
+  ).rejects.toThrow("command not found");
+  expect(manager.fileLifecycle?.owner(key)).toBeNull();
+  const release = manager.fileLifecycle?.claimInactive(key);
+  expect(release).toBeTypeOf("function");
+  release?.();
+  const session = trackTerminal(
+    await manager.createTerminal({
+      id,
+      cwd,
+      workspaceId: "ws-test",
+      ...nodeTerminalCommand("setInterval(() => {}, 1000)"),
+    }),
+  );
+  expect(manager.fileLifecycle?.owner(key)).toBe(id);
+  await session.killAndWait({ gracefulTimeoutMs: 1000, forceTimeoutMs: 1000 });
+  await expect.poll(() => manager?.fileLifecycle?.owner(key)).toBeNull();
+});
+
+it("releases only the failed attempt once, even after timeout and same-ID retry", async () => {
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ requestTimeoutMs: 5, forkWorker: () => worker });
+  const id = "retry-after-timeout";
+  const key = terminalFileKey(id);
+  const first = manager.createTerminal({ id, cwd: "/workspace", workspaceId: "ws-test" });
+  const firstRequest = worker.sentMessages.at(-1)!;
+  await expect(first).rejects.toThrow("timed out");
+  expect(manager.fileLifecycle?.owner(key)).toBe(id);
+  const retry = manager.createTerminal({ id, cwd: "/workspace", workspaceId: "ws-test" });
+  const retryRequest = worker.sentMessages.at(-1)!;
+  const failure = {
+    type: "response" as const,
+    requestId: firstRequest.requestId,
+    ok: false as const,
+    error: "missing command",
+    terminalCreationFailed: true,
+  };
+  worker.emitWorkerMessage(failure);
+  worker.emitWorkerMessage(failure);
+  expect(manager.fileLifecycle?.owner(key)).toBe(id);
+  worker.emitWorkerMessage({
+    type: "terminalCreated",
+    requestId: retryRequest.requestId,
+    terminal: { id, name: "Retry", cwd: "/workspace", workspaceId: "ws-test", activity: null },
+    state: createTerminalState(),
+  });
+  worker.emitWorkerMessage({ type: "response", requestId: retryRequest.requestId, ok: true });
+  await retry;
+  worker.emitWorkerMessage(failure);
+  expect(manager.fileLifecycle?.owner(key)).toBe(id);
+  worker.emitWorkerMessage({
+    type: "terminalExit",
+    terminalId: id,
+    info: { exitCode: 0, signal: null, lastOutputLines: [] },
+  });
+  expect(manager.fileLifecycle?.owner(key)).toBeNull();
+});
+
+it("keeps timed-out creates protected until their delayed creation exits", async () => {
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ requestTimeoutMs: 5, forkWorker: () => worker });
+  const id = "late-create";
+  const key = terminalFileKey(id);
+  const created = manager.createTerminal({ id, cwd: "/workspace", workspaceId: "ws-test" });
+  const request = worker.sentMessages.at(-1)!;
+  await expect(created).rejects.toThrow("timed out");
+  expect(manager.fileLifecycle?.claimInactive(key)).toBeUndefined();
+  worker.emitWorkerMessage({
+    type: "terminalCreated",
+    requestId: request.requestId,
+    terminal: { id, name: "Late", cwd: "/workspace", workspaceId: "ws-test", activity: null },
+    state: createTerminalState(),
+  });
+  // An error after creation is not evidence of process exit.
+  worker.emitWorkerMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok: false,
+    error: "snapshot failed",
+  });
+  expect(manager.getTerminal(id)).toBeDefined();
+  expect(manager.fileLifecycle?.owner(key)).toBe(id);
+  worker.emitWorkerMessage({
+    type: "terminalExit",
+    terminalId: id,
+    info: { exitCode: 0, signal: null, lastOutputLines: [] },
+  });
+  expect(manager.fileLifecycle?.owner(key)).toBeNull();
+});
+
+it("keeps ambiguous worker failures protected but releases local setup failures", async () => {
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({
+    forkWorker: () => worker,
+    getTerminalActivityUrl: () => {
+      throw new Error("local setup failed");
+    },
+  });
+  await expect(
+    manager.createTerminal({ id: "local", cwd: "/workspace", workspaceId: "ws-test" }),
+  ).rejects.toThrow("local setup failed");
+  expect(manager.fileLifecycle?.owner(terminalFileKey("local"))).toBeNull();
+  expect(worker.sentMessages).toEqual([]);
+  manager.killAll();
+  const uncertainWorker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ forkWorker: () => uncertainWorker });
+  const creation = manager.createTerminal({
+    id: "uncertain",
+    cwd: "/workspace",
+    workspaceId: "ws-test",
+  });
+  const request = uncertainWorker.sentMessages.at(-1)!;
+  uncertainWorker.emitWorkerMessage({
+    type: "response",
+    requestId: request.requestId,
+    ok: false,
+    error: "async spawn error",
+  });
+  await expect(creation).rejects.toThrow("async spawn error");
+  expect(manager.fileLifecycle?.owner(terminalFileKey("uncertain"))).toBe("uncertain");
+});

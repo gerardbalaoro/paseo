@@ -157,6 +157,15 @@ export function createWorkerTerminalManager(
   const worker = managerOptions.forkWorker ? managerOptions.forkWorker() : forkTerminalWorker();
   const requestTimeoutMs = managerOptions.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   const pendingRequests = new Map<string, PendingRequest>();
+  // Outlive request timeouts: a late authoritative failure can still release
+  // its own reservation, without touching a retry or an existing live session.
+  const creationReservations = new Map<string, string>();
+  function releaseCreation(requestId: string): void {
+    const terminalId = creationReservations.get(requestId);
+    if (terminalId === undefined) return;
+    creationReservations.delete(requestId);
+    fileLifecycle.end(terminalId);
+  }
   const recordsById = new Map<string, WorkerTerminalRecord>();
   const terminalIdsByCwd = new Map<string, Set<string>>();
   const terminalActivityTokenById = new Map<string, string>();
@@ -559,6 +568,7 @@ export function createWorkerTerminalManager(
   function handleWorkerEvent(message: TerminalWorkerToParentMessage): void {
     switch (message.type) {
       case "terminalCreated": {
+        if (message.requestId) creationReservations.delete(message.requestId);
         fileLifecycle.created(message.terminal.id);
         const session = registerRecord({
           info: asRequiredWorkerTerminalInfo(message.terminal),
@@ -612,6 +622,8 @@ export function createWorkerTerminalManager(
 
   worker.on("message", (message: TerminalWorkerToParentMessage) => {
     if (isResponse(message)) {
+      if (!message.ok && message.terminalCreationFailed) releaseCreation(message.requestId);
+      if (message.ok) creationReservations.delete(message.requestId);
       const pending = pendingRequests.get(message.requestId);
       if (!pending) {
         return;
@@ -636,6 +648,7 @@ export function createWorkerTerminalManager(
 
   worker.on("exit", (code, signal) => {
     workerExited = true;
+    creationReservations.clear();
     fileLifecycle.unavailable();
     if (workerShutdownTimer) {
       clearTimeout(workerShutdownTimer);
@@ -644,11 +657,13 @@ export function createWorkerTerminalManager(
     rejectPendingRequests(new Error(`Terminal worker exited (${signal ?? code ?? "unknown"})`));
   });
 
-  function sendRequest(input: TerminalWorkerRequestInput): Promise<unknown> {
+  function sendRequest(
+    input: TerminalWorkerRequestInput,
+    requestId = randomUUID(),
+  ): Promise<unknown> {
     if (workerExited || !worker.connected) {
       return Promise.reject(new Error("Terminal worker is not running"));
     }
-    const requestId = randomUUID();
     const message = { ...input, requestId } as TerminalWorkerRequest;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -713,33 +728,43 @@ export function createWorkerTerminalManager(
       options: WorkerCreateTerminalOptions & { workspaceId: string },
     ): Promise<TerminalSession> {
       const terminalId = options.id ?? randomUUID();
+      const requestId = randomUUID();
       const retiring = fileLifecycle.begin(terminalId);
-      if (retiring) await retiring;
-      const activityToken = createActivityToken();
-      const terminalActivityUrl = managerOptions.getTerminalActivityUrl?.() ?? null;
-      terminalActivityTokenById.set(terminalId, activityToken);
+      creationReservations.set(requestId, terminalId);
       const creation = { session: null as TerminalSession | null };
-      pendingCreationsById.set(terminalId, creation);
+      let dispatched = false;
       try {
-        await sendRequest({
-          type: "createTerminal",
-          options: {
-            ...options,
-            id: terminalId,
-            activityToken,
-            activityUrl: terminalActivityUrl,
+        if (retiring) await retiring;
+        const activityToken = createActivityToken();
+        const terminalActivityUrl = managerOptions.getTerminalActivityUrl?.() ?? null;
+        terminalActivityTokenById.set(terminalId, activityToken);
+        pendingCreationsById.set(terminalId, creation);
+        // Once dispatched, only an authoritative worker outcome may retire the
+        // reservation. Timeout, IPC errors and post-spawn errors are ambiguous.
+        dispatched = true;
+        await sendRequest(
+          {
+            type: "createTerminal",
+            options: {
+              ...options,
+              id: terminalId,
+              activityToken,
+              activityUrl: terminalActivityUrl,
+            },
           },
-        });
+          requestId,
+        );
         if (!creation.session) {
           throw new Error("Terminal worker completed creation without a terminalCreated event");
         }
         return creation.session;
       } catch (error) {
+        if (!dispatched) releaseCreation(requestId);
         terminalActivityTokenById.delete(terminalId);
-        // Keep this pending ID protected: a timed-out create can finish in the worker.
         throw error;
       } finally {
-        pendingCreationsById.delete(terminalId);
+        if (pendingCreationsById.get(terminalId) === creation)
+          pendingCreationsById.delete(terminalId);
       }
     },
 

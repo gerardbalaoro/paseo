@@ -6,7 +6,11 @@ import {
   TerminalEmulatorRuntime,
   type TerminalClipboard,
 } from "./terminal-emulator-runtime";
-import type { TerminalImagePasteInput, TerminalImagePasteOutcome } from "./terminal-paste";
+import {
+  encodeTerminalPaste,
+  type TerminalImagePasteInput,
+  type TerminalImagePasteOutcome,
+} from "./terminal-paste";
 
 vi.mock("@xterm/addon-webgl", () => ({
   WebglAddon: class WebglAddon {
@@ -450,6 +454,26 @@ describe("terminal emulator runtime in a real browser", () => {
     await waitFor({ predicate: () => mounted.inputs.length > 0 });
     expect(mounted.inputs).toEqual(["legacy renderer paste"]);
   });
+
+  it.each([false, true])(
+    "queued text encoding matches xterm newline semantics (bracketed=%s)",
+    async (bracketedPaste) => {
+      const mounted = createTerminalHost({ width: 720, height: 360 });
+      await waitFor({ predicate: () => mounted.sizes.length > 0 });
+      await new Promise<void>((resolve) =>
+        mounted.runtime.write({
+          data: terminalOutput(bracketedPaste ? "\x1b[?2004h" : "\x1b[?2004l"),
+          onCommitted: resolve,
+        }),
+      );
+      for (const text of ["a\nb", "a\r\nb", "a\rb"]) {
+        const before = mounted.inputs.length;
+        mounted.runtime.paste(text);
+        await waitFor({ predicate: () => mounted.inputs.length > before });
+        expect(encodeTerminalPaste({ text, bracketedPaste })).toBe(mounted.inputs.at(-1));
+      }
+    },
+  );
 
   it("forwards Ctrl+V to the pty when the clipboard holds no text", async () => {
     await page.viewport(900, 600);

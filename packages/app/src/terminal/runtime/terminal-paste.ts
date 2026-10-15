@@ -43,11 +43,13 @@ const BRACKETED_PASTE_END = "\x1b[201~";
 export const TERMINAL_IMAGE_PASTE_KEYSTROKE = "\x16";
 
 export function encodeTerminalPaste(input: TerminalPasteInput): string {
+  // Match xterm.paste even when queued input bypasses the renderer.
+  const text = input.text.replace(/\r?\n/g, "\r");
   if (!input.bracketedPaste) {
-    return input.text;
+    return text;
   }
 
-  const payload = input.text.replaceAll(BRACKETED_PASTE_END, "[201~");
+  const payload = text.replaceAll(BRACKETED_PASTE_END, "[201~");
   return `${BRACKETED_PASTE_START}${payload}${BRACKETED_PASTE_END}`;
 }
 
