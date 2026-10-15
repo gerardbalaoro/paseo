@@ -1,3 +1,4 @@
+import { TerminalImageError } from "@getpaseo/protocol/terminal-image-error";
 import { createTerminalManager } from "./terminal-manager.js";
 import { captureTerminalLines } from "./terminal-capture.js";
 import { TerminalOutputCoalescer } from "./terminal-output-coalescer.js";
@@ -348,6 +349,7 @@ process.on("message", (message: TerminalWorkerRequest) => {
       requestId: message.requestId,
       ok: false,
       error: terminalWorkerErrorMessage(error),
+      ...(error instanceof TerminalImageError ? { imageErrorCode: error.code } : {}),
     });
   });
 });

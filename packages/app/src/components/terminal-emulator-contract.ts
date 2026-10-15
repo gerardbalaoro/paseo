@@ -31,6 +31,7 @@ export interface TerminalEmulatorHandle {
   showKeyboard: () => void;
   blur: () => void;
   inputRaw: (data: string) => void;
+  cancelPaste?: () => void;
 }
 
 export interface TerminalEmulatorProps {
@@ -81,6 +82,7 @@ export interface TerminalEmulatorProps {
   focusRequestToken?: number;
   resizeRequestToken?: number;
   onImagePaste?: (input: TerminalImagePasteInput) => Promise<TerminalImagePasteOutcome>;
+  onPasteFailure?: () => void;
 }
 
 export type {

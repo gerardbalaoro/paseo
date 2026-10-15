@@ -1,3 +1,4 @@
+import type { TerminalImageErrorCode } from "@getpaseo/protocol/terminal-image-error";
 import { messageTooLargeError } from "./daemon-client-transport-utils.js";
 import { legacyUsageIcon } from "./legacy-usage-icons.js";
 import { subscribeTimeline, type TimelineMessage } from "./timeline-subscription/index.js";
@@ -6110,27 +6111,61 @@ export class DaemonClient {
   async writeTerminalClipboardImage(
     input: {
       terminalId?: string;
+      signal?: AbortSignal;
       data: string;
       mimeType: TerminalClipboardWriteImageRequest["mimeType"];
     },
     requestId?: string,
-  ): Promise<{ success: boolean; error: string | null; path?: string; injected?: boolean }> {
-    const payload =
-      await this.sendNamespacedCorrelatedSessionRequest<"terminal.clipboard.write_image.response">({
-        requestId,
-        message: {
-          type: "terminal.clipboard.write_image.request",
-          terminalId: input.terminalId,
-          data: input.data,
-          mimeType: input.mimeType,
-        },
-      });
-    return {
-      success: payload.success,
-      injected: payload.injected,
-      error: payload.error,
-      ...(payload.path ? { path: payload.path } : {}),
+  ): Promise<{
+    success: boolean;
+    error: string | null;
+    errorCode?: TerminalImageErrorCode;
+    path?: string;
+    injected?: boolean;
+  }> {
+    const id = this.createRequestId(requestId);
+    const cancel = () => {
+      // COMPAT(terminalImagePasteSequencing): added in v0.11, remove after 2027-04-15.
+      if (this.lastServerInfoMessage?.features?.terminalImagePasteSequencing !== true) return;
+      try {
+        this.sendSessionMessageStrict({
+          type: "terminal.clipboard.cancel_image.request",
+          requestId: this.createRequestId(),
+          targetRequestId: id,
+        });
+      } catch {
+        /* A disconnected host also cancels its outstanding uploads. */
+      }
     };
+    if (input.signal?.aborted) throw new Error("Image paste cancelled");
+    input.signal?.addEventListener("abort", cancel, { once: true });
+    try {
+      const payload =
+        await this.sendNamespacedCorrelatedSessionRequest<"terminal.clipboard.write_image.response">(
+          {
+            requestId: id,
+            timeout: 15_000,
+            message: {
+              type: "terminal.clipboard.write_image.request",
+              terminalId: input.terminalId,
+              data: input.data,
+              mimeType: input.mimeType,
+            },
+          },
+        );
+      return {
+        success: payload.success,
+        injected: payload.injected,
+        error: payload.error,
+        errorCode: payload.errorCode,
+        ...(payload.path ? { path: payload.path } : {}),
+      };
+    } catch (error) {
+      cancel();
+      throw error;
+    } finally {
+      input.signal?.removeEventListener("abort", cancel);
+    }
   }
 
   async scheduleCreate(options: CreateScheduleOptions): Promise<ScheduleCreatePayload> {

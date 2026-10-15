@@ -1854,6 +1854,7 @@ export class VoiceAssistantWebSocketServer {
         // Legacy clients retain native paste; this host no longer writes a shared clipboard.
         terminalClipboardImage: false,
         terminalImageFiles: true,
+        terminalImagePasteSequencing: true,
         // COMPAT(terminalInputModeReplay): added in v0.2.6, remove gate after 2027-02-02.
         "terminal-input-mode-replay": true,
         // COMPAT(terminalSizeOwnership): added in v0.2.6, remove gate after 2027-02-02.

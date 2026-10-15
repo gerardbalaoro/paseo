@@ -67,6 +67,7 @@ type BridgeInboundMessage =
   | { type: "setPendingModifiers"; streamKey: string; pendingModifiers: PendingTerminalModifiers }
   | { type: "setSwipeGesturesEnabled"; streamKey: string; enabled: boolean }
   | { type: "rawInput"; streamKey: string; data: string }
+  | { type: "cancelPaste"; streamKey: string }
   | {
       type: "imagePasteResult";
       streamKey: string;
@@ -84,6 +85,7 @@ type BridgeOutboundMessage =
   | { type: "bridgeReady" }
   | { type: "rendererReady"; streamKey: string; isReady: boolean }
   | { type: "input"; streamKey: string; data: string }
+  | { type: "pasteFailure"; streamKey: string }
   | { type: "findRequest"; streamKey: string }
   | { type: "findResult"; streamKey: string; result: TerminalFindResult }
   | {
@@ -176,6 +178,7 @@ interface TerminalBridgeCallbacks {
   onInput?: TerminalEmulatorProps["onInput"];
   onOpenLocalFileLink?: TerminalEmulatorProps["onOpenLocalFileLink"];
   onImagePaste?: TerminalEmulatorProps["onImagePaste"];
+  onPasteFailure?: TerminalEmulatorProps["onPasteFailure"];
   onResize?: TerminalEmulatorProps["onResize"];
   onTerminalKey?: TerminalEmulatorProps["onTerminalKey"];
   onPendingModifiersConsumed?: TerminalEmulatorProps["onPendingModifiersConsumed"];
@@ -232,6 +235,9 @@ function dispatchTerminalBridgeMessage(
   switch (message.type) {
     case "input":
       callbacks.onInput?.(message.data);
+      break;
+    case "pasteFailure":
+      callbacks.onPasteFailure?.();
       break;
     case "imagePaste":
       void respondToImagePaste(message, callbacks.onImagePaste, deps.sendToWebView);
@@ -304,6 +310,7 @@ export default function WebViewTerminalEmulator({
   focusRequestToken = 0,
   resizeRequestToken = 0,
   onImagePaste,
+  onPasteFailure,
 }: TerminalEmulatorProps) {
   const webViewRef = useRef<WebView>(null);
   const [webViewEpoch, setWebViewEpoch] = useState(0);
@@ -351,6 +358,7 @@ export default function WebViewTerminalEmulator({
     onResolveLocalFileLink,
     onOpenLocalFileLink,
     onImagePaste,
+    onPasteFailure,
     onSwipeLeft,
     onSwipeRight,
   });
@@ -364,6 +372,7 @@ export default function WebViewTerminalEmulator({
     onPendingModifiersConsumed,
     onOpenLocalFileLink,
     onImagePaste,
+    onPasteFailure,
     onInputModeChange,
     onRendererReadyChange,
     onResolveLocalFileLink,
@@ -481,6 +490,7 @@ export default function WebViewTerminalEmulator({
       paste: (text: string) => {
         sendToWebView({ type: "paste", streamKey, text });
       },
+      cancelPaste: () => sendToWebView({ type: "cancelPaste", streamKey }),
       copySelection: async () => "",
       clear: () => {
         outputDecoderRef.current.decode();

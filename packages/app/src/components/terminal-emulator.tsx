@@ -56,6 +56,7 @@ export interface TerminalEmulatorHandle {
   renderSnapshot: (state: TerminalState | null) => void;
   paste: (text: string) => void;
   inputRaw: (data: string) => void;
+  cancelPaste?: () => void;
   copySelection: (clipboard: TerminalClipboardWriter) => Promise<string>;
   clear: () => void;
   claimSize: () => void;
@@ -154,6 +155,7 @@ interface TerminalEmulatorProps {
   focusRequestToken?: number;
   resizeRequestToken?: number;
   onImagePaste?: (input: TerminalImagePasteInput) => Promise<TerminalImagePasteOutcome>;
+  onPasteFailure?: () => void;
 }
 
 declare global {
@@ -201,6 +203,7 @@ export default function TerminalEmulator({
   focusRequestToken = 0,
   resizeRequestToken = 0,
   onImagePaste,
+  onPasteFailure,
 }: TerminalEmulatorProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -228,6 +231,7 @@ export default function TerminalEmulator({
     onResolveLocalFileLink,
     onOpenLocalFileLink,
     onImagePaste,
+    onPasteFailure,
   });
   mountCallbacksRef.current = {
     onFindRequest,
@@ -240,6 +244,7 @@ export default function TerminalEmulator({
     onResolveLocalFileLink,
     onOpenLocalFileLink,
     onImagePaste,
+    onPasteFailure,
   };
   const initialSnapshotRef = useRef(initialSnapshot);
   initialSnapshotRef.current = initialSnapshot;
@@ -292,6 +297,7 @@ export default function TerminalEmulator({
           runtimeRef.current?.inputRaw(data);
         }
       },
+      cancelPaste: () => runtimeRef.current?.cancelPaste(),
       copySelection: async () => "",
       clear: () => {
         runtimeRef.current?.clear();
@@ -332,6 +338,7 @@ export default function TerminalEmulator({
       inputRaw: (data: string) => {
         runtimeRef.current?.inputRaw(data);
       },
+      cancelPaste: () => runtimeRef.current?.cancelPaste(),
       copySelection: async () => "",
       clear: () => {
         runtimeRef.current?.clear();
@@ -525,6 +532,7 @@ export default function TerminalEmulator({
         onResolveLocalFileLink,
         onOpenLocalFileLink,
         onImagePaste,
+        onPasteFailure,
         onOpenExternalUrl: openExternalUrl,
       },
     });
@@ -539,6 +547,7 @@ export default function TerminalEmulator({
     onResize,
     onTerminalKey,
     onImagePaste,
+    onPasteFailure,
   ]);
 
   useEffect(() => {

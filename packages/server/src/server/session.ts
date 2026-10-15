@@ -1,3 +1,8 @@
+import { pasteTerminalImage } from "../terminal/terminal-image-input.js";
+import {
+  TerminalImageError,
+  terminalImageErrorCode,
+} from "@getpaseo/protocol/terminal-image-error";
 import { AgentDirectory } from "./agent/directory.js";
 import { searchTimeline } from "./agent/chat-search/index.js";
 import type { BrowserToolsBroker } from "./browser-tools/broker.js";
@@ -274,11 +279,10 @@ import {
   createProjectDirectory,
   ProjectDirectoryRequestError,
 } from "./project-directory-service.js";
-import { TerminalInputModeTracker } from "@getpaseo/protocol/terminal-input-mode";
 import { runGitCommand } from "../utils/run-git-command.js";
 import { CreateAgentLifecycleDispatch } from "./agent/create-agent-lifecycle-dispatch.js";
 import { resolveWorktreeSourceCwd } from "./workspace-source.js";
-import { getTerminalImageStore, terminalImageReference } from "./host-clipboard.js";
+import { getTerminalImageStore } from "./host-clipboard.js";
 
 type ProviderSubagentManagerEvent = Extract<
   AgentManagerEvent,
@@ -1283,6 +1287,8 @@ export class Session {
       .detach(source)
       .catch((err) => this.sessionLogger.error({ err }, "Failed to release source subscriptions"));
     this.clientSources.delete(source);
+    for (const abort of this.imageUploads.get(source)?.values() ?? []) abort.abort();
+    this.imageUploads.delete(source);
     this.refreshObservationProducers();
   }
 
@@ -3065,6 +3071,16 @@ export class Session {
         return this.handleWorkspaceScriptStartRequest(msg);
       case "workspace.script.stop.request":
         return this.handleWorkspaceScriptStopRequest(msg);
+      case "terminal.clipboard.cancel_image.request": {
+        const upload = this.imageUploads.get(this.delivery.currentSource)?.get(msg.targetRequestId);
+        const success = Boolean(upload);
+        upload?.abort();
+        this.emit({
+          type: "terminal.clipboard.cancel_image.response",
+          payload: { requestId: msg.requestId, success },
+        });
+        return;
+      }
       case "terminal.clipboard.write_image.request":
         return this.handleTerminalClipboardWriteImageRequest(msg);
       default:
@@ -7302,44 +7318,57 @@ export class Session {
     }
   }
 
+  private readonly imageUploads = new Map<object | undefined, Map<string, AbortController>>();
+
   private async handleTerminalClipboardWriteImageRequest(
     request: Extract<SessionInboundMessage, { type: "terminal.clipboard.write_image.request" }>,
   ): Promise<void> {
+    const source = this.delivery.currentSource;
+    const abort = new AbortController();
+    let uploads = this.imageUploads.get(source);
+    if (!uploads) {
+      uploads = new Map();
+      this.imageUploads.set(source, uploads);
+    }
+    if (uploads.has(request.requestId)) return;
+    uploads.set(request.requestId, abort);
     try {
       const terminal = request.terminalId && this.terminalManager?.getTerminal(request.terminalId);
       if (!terminal || !this.terminalManager)
-        throw new Error("A live terminalId is required for image paste");
-      const modes = new TerminalInputModeTracker();
-      const snapshot = await this.terminalManager.getTerminalState(terminal.id, {
-        scrollbackLines: 0,
+        throw new TerminalImageError(
+          "terminal_closed",
+          "A live terminalId is required for image paste",
+        );
+      await pasteTerminalImage({
+        terminal,
+        manager: this.terminalManager,
+        store: getTerminalImageStore(this.paseoHome, this.terminalManager),
+        image: { terminalId: terminal.id, mimeType: request.mimeType, dataBase64: request.data },
+        signal: abort.signal,
       });
-      if (!snapshot) throw new Error("Terminal closed before image paste completed");
-      modes.feed(snapshot.replayPreamble ?? terminal.getReplayPreamble());
-      if (!modes.getState().bracketedPaste) {
-        throw new Error("Image paste requires an agent that accepts bracketed file paste");
-      }
-      const path = await getTerminalImageStore(this.paseoHome, this.terminalManager).save({
-        terminalId: terminal.id,
-        mimeType: request.mimeType,
-        dataBase64: request.data,
-      });
-      if (this.terminalManager.getTerminal(terminal.id) !== terminal || terminal.getExitInfo()) {
-        throw new Error("Terminal closed before image paste completed");
-      }
-      await terminal.paste(terminalImageReference(path));
       this.emit({
         type: "terminal.clipboard.write_image.response",
         payload: { requestId: request.requestId, success: true, injected: true, error: null },
       });
     } catch (error) {
+      this.sessionLogger.warn(
+        { err: error, terminalId: request.terminalId },
+        "Terminal image paste failed",
+      );
       this.emit({
         type: "terminal.clipboard.write_image.response",
         payload: {
           requestId: request.requestId,
           success: false,
-          error: error instanceof Error ? error.message : String(error),
+          error: "Unable to paste image",
+          errorCode: terminalImageErrorCode(error),
         },
       });
+    } finally {
+      abort.abort();
+      uploads.delete(request.requestId);
+      if (uploads.size === 0 && this.imageUploads.get(source) === uploads)
+        this.imageUploads.delete(source);
     }
   }
 

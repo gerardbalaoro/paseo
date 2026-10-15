@@ -11,7 +11,6 @@ interface Message {
   mimeType?: string;
 }
 interface TerminalFrameWindow extends Window {
-  Promise: PromiseConstructor;
   __PASEO_TERMINAL_WEBVIEW_RECEIVE__(message: unknown): void;
   __paseoTerminal?: Terminal;
 }
@@ -25,7 +24,6 @@ async function mountWebView() {
   frame.style.height = "300px";
   document.body.append(frame);
   const win = frame.contentWindow as TerminalFrameWindow;
-  Object.defineProperty(win.Promise, "withResolvers", { value: undefined });
   Object.assign(win, {
     ReactNativeWebView: { postMessage: (raw: string) => messages.push(JSON.parse(raw)) },
   });
@@ -81,9 +79,13 @@ test("the generated WebView searches its mounted stream and keeps Find commands 
   send({ type: "unmount" });
 });
 
-test.each(["injected", "error", "unsupported"] as const)(
-  "the generated WebView transfers image bytes and handles %s without duplicate input",
-  async (outcome) => {
+test.each([
+  { outcome: "injected", expected: ["after-paste"] },
+  { outcome: "error", expected: ["after-paste"] },
+  { outcome: "unsupported", expected: ["\x16", "after-paste"] },
+] as const)(
+  "the generated WebView transfers image bytes and handles $outcome without duplicate input",
+  async ({ outcome, expected }) => {
     const { win, send, messages } = await mountWebView();
     send({ type: "rawInput", streamKey: "stale", data: "wrong" });
     send({ type: "rawInput", data: "\x16" });
@@ -108,13 +110,13 @@ test.each(["injected", "error", "unsupported"] as const)(
       });
     const request = messages.find((message) => message.type === "imagePaste")!;
     send({ type: "imagePasteResult", requestId: request.requestId, outcome });
-    // Drain the request resolution and runtime continuation before inspecting input.
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(
-      messages.filter((message) => message.type === "input").map((message) => message.data),
-    ).toEqual(outcome === "unsupported" ? ["\x16"] : []);
+    // A queued input is an observable completion boundary, without counting microtasks.
+    send({ type: "rawInput", data: "after-paste" });
+    await expect
+      .poll(() =>
+        messages.filter((message) => message.type === "input").map((message) => message.data),
+      )
+      .toEqual(expected);
     send({ type: "unmount" });
   },
 );
