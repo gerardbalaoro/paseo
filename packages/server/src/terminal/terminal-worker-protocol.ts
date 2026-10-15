@@ -117,11 +117,13 @@ export type TerminalWorkerResponse =
       ok: false;
       error: string;
       imageErrorCode?: TerminalImageErrorCode;
+      terminalCreationFailed?: boolean;
     };
 
 export type TerminalWorkerEvent =
   | {
       type: "terminalCreated";
+      requestId?: string;
       terminal: WorkerTerminalInfo;
       state: TerminalState;
     }

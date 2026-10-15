@@ -969,6 +969,14 @@ export async function assertTerminalCommandCanStart(
   }
 }
 
+/** Validation failed before calling node-pty; no child can complete this attempt later. */
+export class TerminalStartError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Terminal validation failed", { cause });
+    this.name = "TerminalStartError";
+  }
+}
+
 export async function createTerminal(options: CreateTerminalOptions): Promise<TerminalSession> {
   const {
     cwd,
@@ -1024,20 +1032,34 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
 
   ensureNodePtySpawnHelperExecutableForCurrentPlatform();
 
-  // Create PTY
-  const { command: spawnCommand, args: spawnArgs } = command
-    ? await resolveTerminalSpawnCommand(command, args)
-    : { command: resolvedShell, args: [] as string[] };
-  const terminalEnv = buildTerminalEnvironment({
-    shell: spawnCommand,
-    env: {
-      ...env,
-      ...activityEnv,
-      PASEO_WORKSPACE_ID: workspaceId,
-    },
-  });
+  // Only pre-spawn validation is a confirmed failure. Errors from node-pty or
+  // later setup can leave a process alive and must keep its files protected.
+  const {
+    command: spawnCommand,
+    args: spawnArgs,
+    terminalEnv,
+  } = await (async () => {
+    try {
+      const spawn = command
+        ? await resolveTerminalSpawnCommand(command, args)
+        : { command: resolvedShell, args: [] as string[] };
+      const preparedEnv = buildTerminalEnvironment({
+        shell: spawn.command,
+        env: {
+          ...env,
+          ...activityEnv,
+          PASEO_WORKSPACE_ID: workspaceId,
+        },
+      });
 
-  await assertTerminalCommandCanStart({ command, cwd, env: terminalEnv });
+      await assertTerminalCommandCanStart({ command, cwd, env: preparedEnv });
+
+      return { ...spawn, terminalEnv: preparedEnv };
+    } catch (error) {
+      terminal.dispose();
+      throw new TerminalStartError(error);
+    }
+  })();
 
   const ptyProcess = pty.spawn(spawnCommand, spawnArgs, {
     name: "xterm-256color",
