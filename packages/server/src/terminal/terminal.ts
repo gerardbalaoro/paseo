@@ -12,7 +12,15 @@ import {
   statSync,
 } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { basename, delimiter, dirname, extname, join, resolve as resolvePath } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  extname,
+  join,
+  resolve as resolvePath,
+  win32,
+} from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { createExternalProcessEnv } from "../server/paseo-env.js";
@@ -932,6 +940,7 @@ export interface AssertTerminalCommandCanStartInput {
   cwd: string;
   env: Record<string, string>;
   platform?: NodeJS.Platform;
+  exists?: (path: string) => boolean;
 }
 
 // node-pty spawns directly through execve on POSIX, with no shell, so a command
@@ -947,7 +956,14 @@ export async function assertTerminalCommandCanStart(
 ): Promise<void> {
   const { command, cwd, env } = input;
   const platform = input.platform ?? process.platform;
-  if (command === undefined || platform === "win32") {
+  if (command === undefined) return;
+  if (platform === "win32") {
+    // Validate the resolved launch path, after PATHEXT/shim handling. Bare and
+    // relative commands still belong to node-pty. Only absence is conclusive;
+    // other launch failures must retain the worker's uncertain reservation.
+    if (win32.isAbsolute(command) && !(input.exists ?? existsSync)(command)) {
+      throw new TerminalCommandNotFoundError(command);
+    }
     return;
   }
 
@@ -1052,7 +1068,11 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
         },
       });
 
-      await assertTerminalCommandCanStart({ command, cwd, env: preparedEnv });
+      await assertTerminalCommandCanStart({
+        command: process.platform === "win32" ? spawn.command : command,
+        cwd,
+        env: preparedEnv,
+      });
 
       return { ...spawn, terminalEnv: preparedEnv };
     } catch (error) {
