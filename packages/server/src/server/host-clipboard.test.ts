@@ -302,7 +302,7 @@ describe("terminal file references", () => {
     const path = '/tmp/dollar$ back` slash\\ quote"/image.png';
     const reference = terminalImageReference(path, "linux");
     expect(reference.startsWith("file://")).toBe(true);
-    expect(fileURLToPath(reference)).toBe(path);
+    expect(fileURLToPath(reference, { windows: false })).toBe(path);
   });
   test("uses host Windows URL semantics, independent of the client OS", () => {
     expect(terminalImageReference("C:\\Users\\name%name\\image.png", "win32")).toBe(

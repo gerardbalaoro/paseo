@@ -1598,3 +1598,52 @@ it("flushes preceding input before checked paste and preserves following input",
   const expected = "HEX:" + Buffer.from("before\x1b[200~image.png\x1b[201~after").toString("hex");
   await waitForState(session, (state) => getLines(state).some((line) => line.includes(expected)));
 });
+
+describe("Windows pre-spawn existence validation", () => {
+  it.each(["C:\\tools\\absent.exe", "\\\\server\\share\\absent.exe"])(
+    "rejects a missing absolute launch path: %s",
+    async (command) => {
+      const checked: string[] = [];
+      await expect(
+        assertTerminalCommandCanStart({
+          command,
+          cwd: "C:\\work",
+          env: {},
+          platform: "win32",
+          exists: (path) => {
+            checked.push(path);
+            return false;
+          },
+        }),
+      ).rejects.toThrow(`${command}: command not found`);
+      expect(checked).toEqual([command]);
+    },
+  );
+  it("preserves existing launch paths without probing or launching them", async () => {
+    await expect(
+      assertTerminalCommandCanStart({
+        command: "C:\\Windows\\System32\\cmd.exe",
+        cwd: "C:\\work",
+        env: {},
+        platform: "win32",
+        exists: () => true,
+      }),
+    ).resolves.toBeUndefined();
+  });
+  it.each(["tool", "tool.cmd", ".\\tool.exe", undefined])(
+    "leaves unresolved/default commands to the existing launch path: %s",
+    async (command) => {
+      await expect(
+        assertTerminalCommandCanStart({
+          command,
+          cwd: "C:\\work",
+          env: {},
+          platform: "win32",
+          exists: () => {
+            throw new Error("must not check unresolved commands");
+          },
+        }),
+      ).resolves.toBeUndefined();
+    },
+  );
+});
