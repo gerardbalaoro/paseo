@@ -7934,9 +7934,14 @@ test("image upload maps safe errors and cancellation targets only its request", 
         requestId: "image-request",
         success: false,
         error: "Unable to paste image",
-        errorCode: "disk_full",
+        errorCode: "upload_failed",
+        outcomeUnknown: true,
       },
     }),
   );
-  expect(await upload).toMatchObject({ success: false, errorCode: "disk_full" });
+  expect(await upload).toMatchObject({
+    success: false,
+    errorCode: "upload_failed",
+    outcomeUnknown: true,
+  });
 });

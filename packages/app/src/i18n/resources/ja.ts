@@ -629,8 +629,9 @@ export const ja: TranslationResources = {
       pasteImageClosed: "このターミナルは終了しました。ターミナルを開いて再度貼り付けてください。",
       pasteImageUnsupported: "このプログラムは画像ファイルの貼り付けに対応していません。",
       pasteImageInvalid: "10 MiB 未満の PNG または JPEG 画像を使用してください。",
-      pasteImageInputHeld:
-        "貼り付けが完了しませんでした。Enter は送信されていません。入力内容を確認してから再度押してください。",
+      uploadingImage: "画像をアップロード中…",
+      pasteImageUnknown:
+        "画像の挿入を確認できませんでした。再試行する前にターミナルを確認してください。",
     },
     sheet: {
       openAsTab: "タブで開く",

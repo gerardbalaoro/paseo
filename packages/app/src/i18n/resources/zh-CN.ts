@@ -621,7 +621,8 @@ export const zhCN: TranslationResources = {
       pasteImageClosed: "此终端已关闭。请打开终端后重新粘贴。",
       pasteImageUnsupported: "此程序不支持粘贴图片文件。",
       pasteImageInvalid: "请使用小于 10 MiB 的 PNG 或 JPEG 图片。",
-      pasteImageInputHeld: "粘贴未完成。排队的回车未发送，请检查输入内容后再按回车。",
+      uploadingImage: "正在上传图片…",
+      pasteImageUnknown: "无法确认图片是否已插入。请检查终端后再重试。",
     },
     sheet: {
       openAsTab: "作为标签页打开",

@@ -627,8 +627,9 @@ export const ptBR: TranslationResources = {
       pasteImageClosed: "Este terminal foi fechado. Abra um terminal e cole novamente.",
       pasteImageUnsupported: "Este programa não aceita colar arquivos de imagem.",
       pasteImageInvalid: "Use uma imagem PNG ou JPEG menor que 10 MiB.",
-      pasteImageInputHeld:
-        "A colagem não foi concluída. Enter não foi enviado; confira o texto antes de pressioná-lo novamente.",
+      uploadingImage: "Enviando imagem…",
+      pasteImageUnknown:
+        "Não foi possível confirmar a inserção da imagem. Verifique o terminal antes de tentar novamente.",
     },
     sheet: {
       openAsTab: "Abrir como aba",

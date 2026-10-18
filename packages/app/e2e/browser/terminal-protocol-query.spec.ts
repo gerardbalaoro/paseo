@@ -1,3 +1,4 @@
+import { daemonWsRoutePattern } from "../support/helpers/daemon-port";
 import { writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -89,8 +90,9 @@ async function pasteImageInTerminal(
   // Change modes after attachment: a replay-time cache still says disabled.
   harness.client.sendTerminalInput(terminalId, { type: "input", data: "e" });
   await expectCapturedImageOutput(harness, terminalId, "IMAGE_ENABLED");
-  await dispatchImagePaste(target, payload, true);
+  await dispatchImagePaste(target, payload);
   await expectCapturedImageOutput(harness, terminalId, "IMAGE_STAGED");
+  await target.locator('[data-testid="terminal-surface"] .xterm-helper-textarea').press("Enter");
   await expectCapturedImageOutput(harness, terminalId, "ENTER_AFTER_IMAGE");
 }
 
@@ -118,6 +120,32 @@ async function dispatchImagePaste(target: Page, payload: Buffer, enter = false) 
     },
     { bytes: [...payload], enter },
   );
+}
+
+async function delayImageRequest(page: Page) {
+  let release: (() => void) | undefined;
+  let held!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    held = resolve;
+  });
+  await page.routeWebSocket(daemonWsRoutePattern(), (browser) => {
+    const server = browser.connectToServer();
+    server.onMessage((message) => browser.send(message));
+    browser.onMessage((message) => {
+      let type: unknown;
+      try {
+        const envelope = JSON.parse(message.toString());
+        type = (envelope.message ?? envelope).type;
+      } catch {
+        /* Binary terminal input passes through. */
+      }
+      if (!release && type === "terminal.clipboard.write_image.request") {
+        release = () => server.send(message);
+        held();
+      } else server.send(message);
+    });
+  });
+  return { pending, release: () => release?.() };
 }
 
 test.describe("Terminal protocol queries", () => {
@@ -198,7 +226,36 @@ test.describe("Terminal protocol queries", () => {
       await Promise.all(terminals.map((terminal) => harness.killTerminal(terminal.id)));
     }
   });
-  test("failed image paste never automatically submits queued Enter", async ({ page }) => {
+  test("shows upload progress while typing and submission stay live", async ({
+    page,
+  }, testInfo) => {
+    const gate = await delayImageRequest(page);
+    const terminal = await harness.createTerminal({
+      name: "background-image",
+      command: process.execPath,
+      args: ["image-receiver.cjs"],
+    });
+    try {
+      await harness.openTerminal(page, { terminalId: terminal.id });
+      await expectCapturedImageOutput(harness, terminal.id, "IMAGE_RECEIVER_READY");
+      harness.client.sendTerminalInput(terminal.id, { type: "input", data: "e" });
+      await expectCapturedImageOutput(harness, terminal.id, "IMAGE_ENABLED");
+      await dispatchImagePaste(page, Buffer.from("iVBORw0KGgo=", "base64"));
+      await gate.pending;
+      await expect(page.getByTestId("terminal-image-uploading")).toHaveText("Uploading image…");
+      const input = page.locator('[data-testid="terminal-surface"] .xterm-helper-textarea');
+      await input.pressSequentially("describe");
+      await input.press("Enter");
+      await expectCapturedImageOutput(harness, terminal.id, "ENTER_WITHOUT_IMAGE");
+      await page.screenshot({ path: testInfo.outputPath("uploading-image.png") });
+      gate.release();
+      await expectCapturedImageOutput(harness, terminal.id, "IMAGE_STAGED");
+      await expect(page.getByTestId("terminal-image-uploading")).toHaveCount(0);
+    } finally {
+      await harness.killTerminal(terminal.id);
+    }
+  });
+  test("failed image paste does not gate terminal submission", async ({ page }) => {
     const terminal = await harness.createTerminal({
       name: "image-failure",
       command: process.execPath,
@@ -211,12 +268,6 @@ test.describe("Terminal protocol queries", () => {
       await expect(page.getByTestId("app-toast-message")).toContainText(
         "This program does not accept image file pastes.",
       );
-      await expect(page.getByTestId("app-toast-message")).toContainText(
-        "Queued Enter was not sent",
-      );
-      const capture = await harness.client.captureTerminal(terminal.id);
-      expect(capture.lines.join("")).not.toContain("ENTER_WITHOUT_IMAGE");
-      await page.locator('[data-testid="terminal-surface"] .xterm-helper-textarea').press("Enter");
       await expectCapturedImageOutput(harness, terminal.id, "ENTER_WITHOUT_IMAGE");
     } finally {
       await harness.killTerminal(terminal.id);

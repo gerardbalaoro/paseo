@@ -270,8 +270,8 @@ export class TerminalEmulatorRuntime {
     private readonly clipboard: TerminalClipboard = browserClipboard,
   ) {}
 
+  private clipboardReadGeneration = 0;
   private callbacks: TerminalEmulatorRuntimeCallbacks = {};
-  private pasteInputBypass = false;
   private readonly pasteQueue = new TerminalPasteQueue({
     onFailure: () => this.callbacks.onPasteFailure?.(),
   });
@@ -464,8 +464,7 @@ export class TerminalEmulatorRuntime {
         metaKey: event.metaKey,
       });
       if (normalizedKey.toLowerCase() === "c" && modifiers.ctrl) this.pasteQueue.cancel();
-      this.pasteQueue.action((failed) => {
-        if (failed && normalizedKey === "Enter") return;
+      this.pasteQueue.action(() => {
         void this.callbacks.onTerminalKey?.({
           key: normalizeTerminalTransportKey(normalizedKey),
           ...modifiers,
@@ -751,10 +750,6 @@ export class TerminalEmulatorRuntime {
       if (this.suppressInput) {
         return;
       }
-      if (this.pasteInputBypass) {
-        void this.callbacks.onInput?.(data);
-        return;
-      }
       this.pasteQueue.input(data, (value) => {
         void this.callbacks.onInput?.(value);
       });
@@ -956,6 +951,7 @@ export class TerminalEmulatorRuntime {
 
   /** Feeds raw bytes (e.g. the \x16 image-paste keystroke) directly into xterm. */
   cancelPaste(): void {
+    this.clipboardReadGeneration += 1;
     this.pasteQueue.dispose();
   }
 
@@ -968,24 +964,21 @@ export class TerminalEmulatorRuntime {
 
   private async pasteClipboardTextOrImage(terminal: Pick<Terminal, "paste">): Promise<void> {
     // Capture each gesture now, even when an earlier image is still uploading.
-    const readText = (async () => this.clipboard.readText())().catch(() => "");
+    const generation = this.clipboardReadGeneration;
+    const readText = (async () => this.clipboard.readText())()
+      .catch(() => "")
+      .then((text) => {
+        if (text && this.terminal === terminal && generation === this.clipboardReadGeneration)
+          terminal.paste(text);
+        return text;
+      });
     const readImage = this.callbacks.onImagePaste
       ? readClipboardImageFromNavigator(this.clipboard)
       : Promise.resolve(null);
     await this.pasteQueue.paste(async (signal) => {
       const text = await readText;
       if (signal.aborted) return false;
-      if (text.length > 0) {
-        // xterm owns text normalization and bracketed-paste encoding. Its input
-        // callback is synchronous, so only this paste bypasses the queue.
-        this.pasteInputBypass = true;
-        try {
-          terminal.paste(text);
-        } finally {
-          this.pasteInputBypass = false;
-        }
-        return true;
-      }
+      if (text.length > 0) return true;
       return this.forwardClipboardImage({
         readImage: () => readImage,
         input: (data) => {
@@ -1009,7 +1002,7 @@ export class TerminalEmulatorRuntime {
       return true;
     }
     const outcome = await onImagePaste(image).catch(() => "error" as const);
-    if (input.signal.aborted) return false;
+    if (input.signal.aborted && outcome !== "injected") return false;
     if (outcome === "written" || outcome === "unsupported")
       input.input(TERMINAL_IMAGE_PASTE_KEYSTROKE);
     return outcome !== "error";
@@ -1149,7 +1142,7 @@ export class TerminalEmulatorRuntime {
   }
 
   unmount(): void {
-    this.pasteQueue.dispose();
+    this.cancelPaste();
     this.releaseFindOutputAnchor();
     this.clearInFlightOutputTimeout();
     const inFlightOperation = this.inFlightOutputOperation;

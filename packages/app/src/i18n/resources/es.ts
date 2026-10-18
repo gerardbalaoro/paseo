@@ -628,8 +628,9 @@ export const es: TranslationResources = {
       pasteImageClosed: "Este terminal se ha cerrado. Abre otro y vuelve a pegar.",
       pasteImageUnsupported: "Este programa no admite pegar archivos de imagen.",
       pasteImageInvalid: "Usa una imagen PNG o JPEG de menos de 10 MiB.",
-      pasteImageInputHeld:
-        "No se completó el pegado. No se envió Enter; revisa el texto antes de pulsarlo de nuevo.",
+      uploadingImage: "Subiendo imagen…",
+      pasteImageUnknown:
+        "No se pudo confirmar la inserción de la imagen. Revisa el terminal antes de volver a intentarlo.",
     },
     sheet: {
       openAsTab: "Abrir como pestaña",

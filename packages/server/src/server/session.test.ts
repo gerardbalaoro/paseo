@@ -5947,8 +5947,9 @@ for (const { cancellation, expectedResults } of [
         success: false,
       });
       const second = session.handleMessage(request, b);
+      let cancellationResult: Promise<void> | undefined;
       if (cancellation === "request") {
-        await session.handleMessage(
+        cancellationResult = session.handleMessage(
           {
             type: "terminal.clipboard.cancel_image.request",
             requestId: "cancel-own",
@@ -5960,7 +5961,7 @@ for (const { cancellation, expectedResults } of [
         session.clearAgentTimelineSubscription(a);
       }
       release();
-      await Promise.all([first, second]);
+      await Promise.all([first, second, cancellationResult]);
       const results = messages.filter(
         (message) => message.type === "terminal.clipboard.write_image.response",
       );

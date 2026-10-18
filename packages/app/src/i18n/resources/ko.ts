@@ -623,8 +623,9 @@ export const ko: TranslationResources = {
       pasteImageClosed: "이 터미널이 닫혔습니다. 터미널을 열고 다시 붙여넣으세요.",
       pasteImageUnsupported: "이 프로그램은 이미지 파일 붙여넣기를 지원하지 않습니다.",
       pasteImageInvalid: "10 MiB보다 작은 PNG 또는 JPEG 이미지를 사용하세요.",
-      pasteImageInputHeld:
-        "붙여넣기가 완료되지 않았습니다. Enter는 전송되지 않았습니다. 내용을 확인한 뒤 다시 누르세요.",
+      uploadingImage: "이미지 업로드 중…",
+      pasteImageUnknown:
+        "이미지 삽입을 확인할 수 없습니다. 다시 시도하기 전에 터미널을 확인하세요.",
     },
     sheet: {
       openAsTab: "탭으로 열기",

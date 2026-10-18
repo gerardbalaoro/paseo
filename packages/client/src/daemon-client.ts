@@ -6380,6 +6380,7 @@ export class DaemonClient {
     errorCode?: TerminalImageErrorCode;
     path?: string;
     injected?: boolean;
+    outcomeUnknown?: boolean;
   }> {
     const id = this.createRequestId(requestId);
     const cancel = () => {
@@ -6414,6 +6415,7 @@ export class DaemonClient {
       return {
         success: payload.success,
         injected: payload.injected,
+        outcomeUnknown: payload.outcomeUnknown,
         error: payload.error,
         errorCode: payload.errorCode,
         ...(payload.path ? { path: payload.path } : {}),

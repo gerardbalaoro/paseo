@@ -6596,6 +6596,7 @@ export const TerminalClipboardWriteImageResponseSchema = z.object({
     requestId: z.string(),
     success: z.boolean(),
     injected: z.boolean().optional(),
+    outcomeUnknown: z.boolean().optional(),
     error: z.string().nullable(),
     errorCode: z
       .enum([

@@ -619,8 +619,9 @@ export const en = {
       pasteImageClosed: "This terminal has closed. Open a terminal and paste again.",
       pasteImageUnsupported: "This program does not accept image file pastes.",
       pasteImageInvalid: "Use a PNG or JPEG image smaller than 10 MiB.",
-      pasteImageInputHeld:
-        "Paste did not finish. Queued Enter was not sent; check the prompt before pressing Enter again.",
+      uploadingImage: "Uploading image…",
+      pasteImageUnknown:
+        "Image insertion could not be confirmed. Check the terminal before trying again.",
     },
     sheet: {
       openAsTab: "Open as tab",

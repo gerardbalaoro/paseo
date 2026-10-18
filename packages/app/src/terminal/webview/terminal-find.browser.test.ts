@@ -82,7 +82,7 @@ test("the generated WebView searches its mounted stream and keeps Find commands 
 test.each([
   { outcome: "injected", expected: ["after-paste"] },
   { outcome: "error", expected: ["after-paste"] },
-  { outcome: "unsupported", expected: ["\x16", "after-paste"] },
+  { outcome: "unsupported", expected: ["after-paste", "\x16"] },
 ] as const)(
   "the generated WebView transfers image bytes and handles $outcome without duplicate input",
   async ({ outcome, expected }) => {
@@ -109,9 +109,12 @@ test.each([
         mimeType: "image/png",
       });
     const request = messages.find((message) => message.type === "imagePaste")!;
-    send({ type: "imagePasteResult", requestId: request.requestId, outcome });
-    // A queued input is an observable completion boundary, without counting microtasks.
     send({ type: "rawInput", data: "after-paste" });
+    expect(
+      messages.filter((message) => message.type === "input").map((message) => message.data),
+    ).toEqual(["after-paste"]);
+    send({ type: "imagePasteResult", requestId: request.requestId, outcome });
+    await new Promise<void>((resolve) => win.requestAnimationFrame(() => resolve()));
     await expect
       .poll(() =>
         messages.filter((message) => message.type === "input").map((message) => message.data),

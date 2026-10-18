@@ -1186,9 +1186,9 @@ it("reports paste acknowledgement timeouts and worker disconnects", async () => 
     state: createTerminalState(),
   });
   const session = manager.getTerminal("paste-test")!;
-  await expect(session.paste("image.png")).rejects.toThrow("request timed out: paste");
+  await expect(session.paste("image.png")).rejects.toMatchObject({ code: "upload_failed" });
   const pending = session.paste("image.png");
-  const rejected = expect(pending).rejects.toThrow("Terminal worker");
+  const rejected = expect(pending).rejects.toMatchObject({ code: "upload_failed" });
   worker.disconnect();
   await rejected;
 });
@@ -1325,4 +1325,35 @@ it("keeps ambiguous worker failures protected but releases local setup failures"
   });
   await expect(creation).rejects.toThrow("async spawn error");
   expect(manager.fileLifecycle?.owner(terminalFileKey("uncertain"))).toBe("uncertain");
+});
+
+it("does not call an already claimed paste cancelled and reports lost acknowledgement truthfully", async () => {
+  const { claimTerminalPastePermit } = await import("./terminal-paste-permit.js");
+  const worker = new FakeTerminalWorker();
+  manager = createWorkerTerminalManager({ requestTimeoutMs: 100, forkWorker: () => worker });
+  worker.emitWorkerMessage({
+    type: "terminalCreated",
+    terminal: {
+      id: "claimed-paste",
+      name: "Terminal",
+      cwd: tmpdir(),
+      workspaceId: "ws-test",
+      activity: null,
+    },
+    state: createTerminalState(),
+  });
+  const terminal = manager.getTerminal("claimed-paste")!;
+  const abort = new AbortController();
+  const pending = terminal.paste("image.png", { signal: abort.signal });
+  const request = worker.sentMessages.at(-1);
+  if (request?.type !== "paste") throw new Error("Expected paste request");
+  claimTerminalPastePermit(request.permit, request.deadline);
+  abort.abort();
+  worker.emitWorkerMessage({ type: "response", requestId: request.requestId, ok: true });
+  await expect(pending).resolves.toBeUndefined();
+  const uncertain = terminal.paste("second.png");
+  const next = worker.sentMessages.at(-1);
+  if (next?.type !== "paste") throw new Error("Expected paste request");
+  claimTerminalPastePermit(next.permit, next.deadline);
+  await expect(uncertain).rejects.toMatchObject({ code: "outcome_unknown" });
 });

@@ -946,7 +946,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-it("holds Enter before clipboard reading and until image acknowledgement", async () => {
+it("keeps typing and Enter live while clipboard reading and image upload are pending", async () => {
   const read = deferred<string>();
   const upload = deferred<TerminalImagePasteOutcome>();
   const mounted = createTerminalHost({
@@ -958,16 +958,16 @@ it("holds Enter before clipboard reading and until image acknowledgement", async
   mounted.clipboard.readText = () => read.promise;
   dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
   mounted.runtime.inputRaw("describe\r");
-  expect(mounted.inputs).toEqual([]);
+  expect(mounted.inputs).toEqual(["describe\r"]);
   read.resolve("");
   await waitFor({ predicate: () => mounted.images.length === 1 });
-  expect(mounted.inputs).toEqual([]);
+  expect(mounted.inputs).toEqual(["describe\r"]);
   upload.resolve("injected");
   await waitFor({ predicate: () => mounted.inputs.length > 0 });
   expect(mounted.inputs).toEqual(["describe\r"]);
 });
 
-it("preserves text but does not submit Enter after image upload failure", async () => {
+it("leaves submitted input unchanged after image upload failure", async () => {
   const upload = deferred<TerminalImagePasteOutcome>();
   const mounted = createTerminalHost({
     width: 720,
@@ -980,9 +980,9 @@ it("preserves text but does not submit Enter after image upload failure", async 
   await waitFor({ predicate: () => mounted.images.length === 1 });
   upload.resolve("error");
   await waitFor({ predicate: () => mounted.inputs.length > 0 });
-  expect(mounted.inputs).toEqual(["describe"]);
+  expect(mounted.inputs).toEqual(["describe\r"]);
   mounted.runtime.inputRaw("\r");
-  expect(mounted.inputs).toEqual(["describe", "\r"]);
+  expect(mounted.inputs).toEqual(["describe\r", "\r"]);
 });
 
 it("keeps clipboard adapters local to each runtime", async () => {
@@ -1014,7 +1014,7 @@ it("captures consecutive clipboard images at their gestures and uploads in order
   await waitFor({ predicate: () => mounted.images.length === 1 });
   expect(mounted.images[0]?.data).toBe("AQ==");
   first.resolve("injected");
-  await waitFor({ predicate: () => mounted.inputs.length === 1 });
+  await waitFor({ predicate: () => mounted.images.length === 2 });
   expect(mounted.images.map((image) => image.data)).toEqual(["AQ==", "Ag=="]);
   expect(mounted.inputs).toEqual(["\r"]);
 });
@@ -1033,7 +1033,7 @@ it("Ctrl+C cancels clipboard reading before any image reaches the host", async (
   mounted.runtime.inputRaw("\x03");
   read.resolve("");
   await nextFrame();
-  expect(mounted.inputs).toEqual(["text", "\x03"]);
+  expect(mounted.inputs).toEqual(["text\r", "\x03"]);
   expect(mounted.images).toEqual([]);
 });
 
@@ -1049,10 +1049,27 @@ it("disconnect cancels pending clipboard reads without replay after reconnect", 
   dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
   mounted.runtime.inputRaw("old\r");
   mounted.runtime.cancelPaste();
-  read.resolve("");
+  read.resolve("late clipboard text");
   await nextFrame();
   expect(mounted.images).toEqual([]);
-  expect(mounted.inputs).toEqual([]);
+  expect(mounted.inputs).toEqual(["old\r"]);
   mounted.runtime.inputRaw("new");
-  expect(mounted.inputs).toEqual(["new"]);
+  expect(mounted.inputs).toEqual(["old\r", "new"]);
+});
+
+it("pastes ordinary clipboard text while an earlier image is uploading", async () => {
+  const upload = deferred<TerminalImagePasteOutcome>();
+  const mounted = createTerminalHost({
+    width: 720,
+    height: 360,
+    onImagePaste: () => upload.promise,
+  });
+  setClipboardImage(mounted.clipboard);
+  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
+  await waitFor({ predicate: () => mounted.images.length === 1 });
+  mounted.clipboard.readText = async () => "still usable\n";
+  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
+  await waitFor({ predicate: () => mounted.inputs.length === 1 });
+  expect(mounted.inputs).toEqual(["still usable\r"]);
+  upload.resolve("injected");
 });

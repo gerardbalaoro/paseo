@@ -1,3 +1,4 @@
+import { claimTerminalPastePermit } from "./terminal-paste-permit.js";
 import { TerminalImageError } from "@getpaseo/protocol/terminal-image-error";
 import { createTerminalManager } from "./terminal-manager.js";
 import { captureTerminalLines } from "./terminal-capture.js";
@@ -334,6 +335,7 @@ async function handleRequest(message: TerminalWorkerRequest): Promise<void> {
     }
 
     case "paste": {
+      claimTerminalPastePermit(message.permit, message.deadline);
       const session = manager.getTerminal(message.terminalId);
       if (!session) throw new Error("Terminal closed before image paste completed");
       await session.paste(message.text);

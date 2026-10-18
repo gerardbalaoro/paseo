@@ -622,7 +622,8 @@ export const ar: TranslationResources = {
       pasteImageClosed: "أُغلقت هذه الطرفية. افتح طرفية والصق مجددًا.",
       pasteImageUnsupported: "هذا البرنامج لا يدعم لصق ملفات الصور.",
       pasteImageInvalid: "استخدم صورة PNG أو JPEG أصغر من 10 MiB.",
-      pasteImageInputHeld: "لم يكتمل اللصق. لم يُرسل Enter؛ راجع النص قبل الضغط عليه مجددًا.",
+      uploadingImage: "جارٍ رفع الصورة…",
+      pasteImageUnknown: "تعذر تأكيد إدراج الصورة. تحقق من الطرفية قبل المحاولة مجددًا.",
     },
     sheet: {
       openAsTab: "فتح كعلامة تبويب",

@@ -3161,13 +3161,17 @@ export class Session {
         return this.handleWorkspaceScriptStopRequest(msg);
       case "terminal.clipboard.cancel_image.request": {
         const upload = this.imageUploads.get(this.delivery.currentSource)?.get(msg.targetRequestId);
-        const success = Boolean(upload);
         upload?.abort();
-        this.emit({
-          type: "terminal.clipboard.cancel_image.response",
-          payload: { requestId: msg.requestId, success },
+        return (
+          upload
+            ? (this.imageUploadCompletions.get(upload) ?? Promise.resolve(false))
+            : Promise.resolve(false)
+        ).then((success) => {
+          return this.emit({
+            type: "terminal.clipboard.cancel_image.response",
+            payload: { requestId: msg.requestId, success },
+          });
         });
-        return;
       }
       case "terminal.clipboard.write_image.request":
         return this.handleTerminalClipboardWriteImageRequest(msg);
@@ -7347,6 +7351,7 @@ export class Session {
     }
   }
 
+  private readonly imageUploadCompletions = new WeakMap<AbortController, Promise<boolean>>();
   private readonly imageUploads = new Map<object | undefined, Map<string, AbortController>>();
 
   private async handleTerminalClipboardWriteImageRequest(
@@ -7361,6 +7366,14 @@ export class Session {
     }
     if (uploads.has(request.requestId)) return;
     uploads.set(request.requestId, abort);
+    let complete!: (cancelled: boolean) => void;
+    let cancelled = false;
+    this.imageUploadCompletions.set(
+      abort,
+      new Promise((resolveCompletion) => {
+        complete = resolveCompletion;
+      }),
+    );
     try {
       const terminal = request.terminalId && this.terminalManager?.getTerminal(request.terminalId);
       if (!terminal || !this.terminalManager)
@@ -7380,6 +7393,9 @@ export class Session {
         payload: { requestId: request.requestId, success: true, injected: true, error: null },
       });
     } catch (error) {
+      cancelled =
+        abort.signal.aborted &&
+        !(error instanceof TerminalImageError && error.code === "outcome_unknown");
       this.sessionLogger.warn(
         { err: error, terminalId: request.terminalId },
         "Terminal image paste failed",
@@ -7391,9 +7407,13 @@ export class Session {
           success: false,
           error: "Unable to paste image",
           errorCode: terminalImageErrorCode(error),
+          ...(error instanceof TerminalImageError && error.code === "outcome_unknown"
+            ? { outcomeUnknown: true }
+            : {}),
         },
       });
     } finally {
+      complete(cancelled);
       abort.abort();
       uploads.delete(request.requestId);
       if (uploads.size === 0 && this.imageUploads.get(source) === uploads)

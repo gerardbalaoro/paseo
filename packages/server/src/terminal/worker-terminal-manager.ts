@@ -1,3 +1,4 @@
+import { createTerminalPastePermit } from "./terminal-paste-permit.js";
 import { TerminalImageError } from "@getpaseo/protocol/terminal-image-error";
 import { TerminalFileLifecycle } from "./terminal-file-lifecycle.js";
 import { fileURLToPath } from "node:url";
@@ -281,14 +282,54 @@ export function createWorkerTerminalManager(
         }
         sendBestEffortRequest({ type: "send", terminalId: record.info.id, message });
       },
-      async paste(text: string): Promise<void> {
+      async paste(text: string, options?: { signal?: AbortSignal }): Promise<void> {
         if (recordsById.get(record.info.id) !== record || record.exitInfo) {
           throw new TerminalImageError(
             "terminal_closed",
             "Terminal closed before image paste completed",
           );
         }
-        await sendRequest({ type: "paste", terminalId: record.info.id, text });
+        if (options?.signal?.aborted)
+          throw new TerminalImageError("upload_failed", "Image paste cancelled");
+        const permit = createTerminalPastePermit();
+        let revoked = false;
+        let rejectCancellation!: (error: Error) => void;
+        const cancellation = new Promise<never>((_, reject) => {
+          rejectCancellation = reject;
+        });
+        const cancel = () => {
+          // If the worker already claimed it, wait for its answer. Applied input
+          // cannot be undone and must not be reported as a successful cancellation.
+          if (permit.revoke()) {
+            revoked = true;
+            rejectCancellation(new TerminalImageError("upload_failed", "Image paste cancelled"));
+          }
+        };
+        options?.signal?.addEventListener("abort", cancel, { once: true });
+        try {
+          await Promise.race([
+            sendRequest({
+              type: "paste",
+              terminalId: record.info.id,
+              text,
+              permit: permit.path,
+              deadline: Date.now() + requestTimeoutMs,
+            }),
+            cancellation,
+          ]);
+        } catch (error) {
+          if (error instanceof TerminalImageError) throw error;
+          if (revoked || permit.revoke())
+            throw new TerminalImageError("upload_failed", "Image paste stopped before insertion");
+          throw new TerminalImageError(
+            "outcome_unknown",
+            "Image insertion could not be confirmed",
+            { cause: error },
+          );
+        } finally {
+          options?.signal?.removeEventListener("abort", cancel);
+          permit.dispose();
+        }
       },
       subscribe(
         listener: (msg: ServerMessage) => void,

@@ -113,7 +113,7 @@ export interface TerminalSession {
   cwd: string;
   workspaceId: string;
   send(msg: ClientMessage): void;
-  paste(text: string): Promise<void>;
+  paste(text: string, options?: { signal?: AbortSignal }): Promise<void>;
   subscribe(listener: (msg: ServerMessage) => void, options?: TerminalSubscribeOptions): () => void;
   onExit(listener: (info: TerminalExitInfo) => void): () => void;
   onCommandFinished(listener: (info: TerminalCommandFinishedInfo) => void): () => void;
@@ -1436,7 +1436,9 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     });
   }
 
-  async function paste(text: string): Promise<void> {
+  async function paste(text: string, pasteOptions?: { signal?: AbortSignal }): Promise<void> {
+    if (pasteOptions?.signal?.aborted)
+      throw new TerminalImageError("upload_failed", "Image paste cancelled");
     if (killed || disposed || exitInfo) {
       throw new TerminalImageError(
         "terminal_closed",
@@ -1448,7 +1450,13 @@ export async function createTerminal(options: CreateTerminalOptions): Promise<Te
     }
     // Keep the check and PTY write in the same turn, after earlier queued input.
     flushPendingInput();
-    writeInputToPty(`\x1b[200~${text}\x1b[201~`);
+    try {
+      writeInputToPty(`\x1b[200~${text}\x1b[201~`);
+    } catch (error) {
+      throw new TerminalImageError("outcome_unknown", "Image insertion could not be confirmed", {
+        cause: error,
+      });
+    }
   }
 
   function send(msg: ClientMessage): void {

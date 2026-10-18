@@ -22,30 +22,30 @@ function setup() {
 }
 
 describe("terminal paste ordering", () => {
-  test("holds input from the gesture through acknowledgement, without blocking another terminal", async () => {
+  test("sends typing and Enter during uploads without blocking another terminal", async () => {
     const a = setup();
     const b = setup();
     const upload = deferred<boolean>();
     const paste = a.queue.paste(() => upload.promise);
     a.queue.input("describe\r", a.send);
     b.queue.input("other\r", b.send);
-    expect(a.output).toEqual([]);
+    expect(a.output).toEqual(["describe\r"]);
     expect(b.output).toEqual(["other\r"]);
     a.send("image");
     upload.resolve(true);
     await paste;
-    expect(a.output).toEqual(["image", "describe\r"]);
+    expect(a.output).toEqual(["describe\r", "image"]);
   });
-  test("failure preserves text but requires a new Enter", async () => {
+  test("failure leaves already-sent text and Enter unchanged", async () => {
     const a = setup();
     const upload = deferred<boolean>();
     const paste = a.queue.paste(() => upload.promise);
     a.queue.input("describe\r\n", a.send);
     upload.resolve(false);
     await paste;
-    expect(a.output).toEqual(["describe"]);
+    expect(a.output).toEqual(["describe\r\n"]);
     a.queue.input("\r", a.send);
-    expect(a.output).toEqual(["describe", "\r"]);
+    expect(a.output).toEqual(["describe\r\n", "\r"]);
   });
   test("consecutive images remain ordered with intervening input", async () => {
     const a = setup();
@@ -61,12 +61,12 @@ describe("terminal paste ordering", () => {
     a.send("first");
     first.resolve(true);
     await one;
-    expect(a.output).toEqual(["first", "a", "second"]);
+    expect(a.output).toEqual(["a", "\r", "first", "second"]);
     second.resolve(true);
     await two;
-    expect(a.output).toEqual(["first", "a", "second", "\r"]);
+    expect(a.output).toEqual(["a", "\r", "first", "second"]);
   });
-  test("timeout aborts work and ignores a late successful result", async () => {
+  test("timeout requests cancellation and waits for the authoritative outcome", async () => {
     const a = setup();
     const late = deferred<boolean>();
     let signal!: AbortSignal;
@@ -76,14 +76,13 @@ describe("terminal paste ordering", () => {
     });
     a.queue.input("text\r", a.send);
     a.expire();
-    expect(await paste).toBe(false);
     expect(signal.aborted).toBe(true);
-    expect(a.output).toEqual(["text"]);
+    expect(a.output).toEqual(["text\r"]);
     late.resolve(true);
-    await late.promise;
-    expect(a.output).toEqual(["text"]);
+    expect(await paste).toBe(true);
+    expect(a.output).toEqual(["text\r"]);
   });
-  test("Ctrl+C cancels active and consecutive images without submitting queued Enter", async () => {
+  test("Ctrl+C requests cancellation while input and Enter stay live", async () => {
     const a = setup();
     const gate = deferred<boolean>();
     const one = a.queue.paste(() => gate.promise);
@@ -93,9 +92,10 @@ describe("terminal paste ordering", () => {
     });
     a.queue.input("text\r", a.send);
     a.queue.input("\x03", a.send);
+    gate.resolve(false);
     expect(await one).toBe(false);
     expect(await two).toBe(false);
-    expect(a.output).toEqual(["text", "\x03"]);
+    expect(a.output).toEqual(["text\r", "\x03"]);
   });
   test("disconnect/disposal never replays queued input into a replacement connection", async () => {
     const a = setup();
@@ -103,31 +103,31 @@ describe("terminal paste ordering", () => {
     const paste = a.queue.paste(() => gate.promise);
     a.queue.input("old\r", a.send);
     a.queue.dispose();
+    gate.resolve(false);
     expect(await paste).toBe(false);
-    gate.resolve(true);
     await gate.promise;
     a.queue.input("new", a.send);
-    expect(a.output).toEqual(["new"]);
+    expect(a.output).toEqual(["old\r", "new"]);
   });
-  test("enhanced Enter actions are suppressed after failure", async () => {
+  test("enhanced Enter actions remain live during uploads", async () => {
     const a = setup();
     const gate = deferred<boolean>();
     const paste = a.queue.paste(() => gate.promise);
-    a.queue.action((failed) => {
-      if (!failed) a.send("enhanced Enter");
+    a.queue.action(() => {
+      a.send("enhanced Enter");
     });
     gate.resolve(false);
     await paste;
-    expect(a.output).toEqual([]);
+    expect(a.output).toEqual(["enhanced Enter"]);
   });
 });
 
-test("failed paste suppresses enhanced Enter while preserving other keys", async () => {
+test("failed paste never rewrites terminal key sequences", async () => {
   const a = setup();
   const gate = deferred<boolean>();
   const paste = a.queue.paste(() => gate.promise);
   a.queue.input("text\x1b[13;5u\x1b[27;2;13~\x1b[A", a.send);
   gate.resolve(false);
   await paste;
-  expect(a.output).toEqual(["text\x1b[A"]);
+  expect(a.output).toEqual(["text\x1b[13;5u\x1b[27;2;13~\x1b[A"]);
 });

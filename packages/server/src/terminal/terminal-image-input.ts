@@ -58,7 +58,9 @@ export async function pasteTerminalImage(options: {
           "Terminal closed before image paste completed",
         );
       assertActive();
-      await terminal.paste(terminalImageReference(path));
+      await terminal.paste(terminalImageReference(path), {
+        signal: AbortSignal.any([signal, options.signal]),
+      });
       return true;
     } catch (error) {
       failure = error;

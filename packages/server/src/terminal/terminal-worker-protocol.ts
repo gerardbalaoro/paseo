@@ -96,6 +96,8 @@ export type TerminalWorkerRequest =
       requestId: string;
       terminalId: string;
       text: string;
+      permit: string;
+      deadline: number;
     }
   | {
       type: "send";
@@ -116,7 +118,7 @@ export type TerminalWorkerResponse =
       requestId: string;
       ok: false;
       error: string;
-      imageErrorCode?: TerminalImageErrorCode;
+      imageErrorCode?: TerminalImageErrorCode | "outcome_unknown";
       terminalCreationFailed?: boolean;
     };
 

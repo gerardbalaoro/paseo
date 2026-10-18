@@ -6,7 +6,7 @@ export type TerminalImageErrorCode = NonNullable<
 
 export class TerminalImageError extends Error {
   constructor(
-    readonly code: TerminalImageErrorCode,
+    readonly code: TerminalImageErrorCode | "outcome_unknown",
     message: string,
     options?: ErrorOptions,
   ) {
@@ -16,7 +16,8 @@ export class TerminalImageError extends Error {
 
 /** Never send filesystem paths or arbitrary exception messages to clients. */
 export function terminalImageErrorCode(error: unknown): TerminalImageErrorCode {
-  if (error instanceof TerminalImageError) return error.code;
+  if (error instanceof TerminalImageError)
+    return error.code === "outcome_unknown" ? "upload_failed" : error.code;
   if (
     error &&
     typeof error === "object" &&

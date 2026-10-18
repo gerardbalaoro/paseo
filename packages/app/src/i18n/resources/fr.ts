@@ -628,8 +628,9 @@ export const fr: TranslationResources = {
       pasteImageClosed: "Ce terminal est fermé. Ouvrez un terminal et réessayez.",
       pasteImageUnsupported: "Ce programme n’accepte pas le collage de fichiers image.",
       pasteImageInvalid: "Utilisez une image PNG ou JPEG de moins de 10 Mio.",
-      pasteImageInputHeld:
-        "Le collage n’a pas abouti. Entrée n’a pas été envoyée ; vérifiez le texte avant de réessayer.",
+      uploadingImage: "Envoi de l’image…",
+      pasteImageUnknown:
+        "L’insertion de l’image n’a pas pu être confirmée. Vérifiez le terminal avant de réessayer.",
     },
     sheet: {
       openAsTab: "Ouvrir dans un onglet",
