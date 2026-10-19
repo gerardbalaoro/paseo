@@ -22,6 +22,26 @@ function getFilePath(file: File, bridge: DesktopHostBridge | null): string | nul
   return getLegacyFilePath(file);
 }
 
+/** Keep images out of the path-only drop flow, including unsupported image formats. */
+export function isTerminalImageFile(file: Pick<File, "name" | "type">): boolean {
+  return Boolean(
+    file.type?.startsWith("image/") ||
+    /\.(?:png|jpe?g|gif|webp|avif|heic|heif|bmp|tiff?|svg|ico)$/i.test(file.name),
+  );
+}
+
+export function terminalDropImageMimeType(
+  file: Pick<File, "name" | "type">,
+): "image/png" | "image/jpeg" | null {
+  if (file.type === "image/png" || file.type === "image/jpeg") return file.type;
+  // Some desktop drag sources omit the MIME type; the daemon still validates bytes.
+  if (!file.type) {
+    if (/\.png$/i.test(file.name)) return "image/png";
+    if (/\.jpe?g$/i.test(file.name)) return "image/jpeg";
+  }
+  return null;
+}
+
 export function isTerminalFileDrag(dataTransfer: DataTransfer | null): boolean {
   return Boolean(dataTransfer && Array.from(dataTransfer.types).includes("Files"));
 }
@@ -58,6 +78,7 @@ export function extractTerminalDropPaths(
 
   const paths: string[] = [];
   for (const file of Array.from(dataTransfer.files)) {
+    if (isTerminalImageFile(file)) continue;
     const path = getFilePath(file, bridge);
     if (path) {
       paths.push(path);

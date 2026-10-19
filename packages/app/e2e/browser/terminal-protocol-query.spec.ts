@@ -36,6 +36,11 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { fileURLToPath } = require('node:url');
 let pending = '', imagePath;
+function readImage(prefix) {
+  const bytes = fs.readFileSync(imagePath);
+  const mode = fs.statSync(imagePath).mode & 0o777;
+  process.stdout.write(prefix + crypto.createHash('sha256').update(bytes).digest('hex') + ':' + mode.toString(8) + '\\r\\n');
+}
 process.stdin.setRawMode(true);
 process.stdin.resume();
 process.stdout.write('IMAGE_RECEIVER_READY\\r\\n');
@@ -43,18 +48,19 @@ process.stdin.on('data', chunk => {
   if (chunk.toString() === 'e') { process.stdout.write('\\x1b[?2004hIMAGE_ENABLED\\r\\n'); return; }
   if (chunk.toString() === 'd') { process.stdout.write('\\x1b[?2004lIMAGE_DISABLED\\r\\n'); return; }
   pending += chunk.toString();
-  const end = pending.indexOf('\\x1b[201~');
-  if (end >= 0) {
+  let end = pending.indexOf('\\x1b[201~');
+  while (end >= 0) {
     const start = pending.indexOf('\\x1b[200~');
     const reference = pending.slice(start + 6, end);
     if (start < 0 || reference.length < 3) throw new Error('Empty image file reference');
     imagePath = reference.startsWith('file:') ? fileURLToPath(reference) : reference.slice(1, -1);
     pending = pending.slice(end + 6);
     process.stdout.write('IMAGE_STAGED\\r\\n');
-  } else if (imagePath && pending.includes('r')) {
-    const bytes = fs.readFileSync(imagePath);
-    const mode = fs.statSync(imagePath).mode & 0o777;
-    process.stdout.write('IMAGE_READ:' + crypto.createHash('sha256').update(bytes).digest('hex') + ':' + mode.toString(8) + '\\r\\n');
+    if (process.argv.includes('--read-on-arrival')) readImage('DROP_READ:');
+    end = pending.indexOf('\\x1b[201~');
+  }
+  if (imagePath && pending.includes('r')) {
+    readImage('IMAGE_READ:');
     pending = '';
   }
   if (pending.includes('\\r')) { process.stdout.write((imagePath ? 'ENTER_AFTER_IMAGE' : 'ENTER_WITHOUT_IMAGE') + '\\r\\n'); pending = ''; }
@@ -119,6 +125,25 @@ async function dispatchImagePaste(target: Page, payload: Buffer, enter = false) 
         );
     },
     { bytes: [...payload], enter },
+  );
+}
+
+async function dispatchImageDrop(target: Page, payloads: Buffer[], mixed = false) {
+  await target.locator('[data-testid="terminal-surface"] .xterm-helper-textarea').evaluate(
+    (element, { images, mixed: includeTextFile }) => {
+      const dataTransfer = new DataTransfer();
+      for (const bytes of images) {
+        dataTransfer.items.add(
+          new File([new Uint8Array(bytes)], "local-only.png", { type: "image/png" }),
+        );
+      }
+      if (includeTextFile)
+        dataTransfer.items.add(new File(["ordinary file"], "notes.txt", { type: "text/plain" }));
+      element.dispatchEvent(
+        new DragEvent("drop", { dataTransfer, bubbles: true, cancelable: true }),
+      );
+    },
+    { images: payloads.map((payload) => [...payload]), mixed },
   );
 }
 
@@ -226,31 +251,69 @@ test.describe("Terminal protocol queries", () => {
       await Promise.all(terminals.map((terminal) => harness.killTerminal(terminal.id)));
     }
   });
-  test("shows upload progress while typing and submission stay live", async ({
-    page,
-  }, testInfo) => {
-    const gate = await delayImageRequest(page);
-    const terminal = await harness.createTerminal({
-      name: "background-image",
-      command: process.execPath,
-      args: ["image-receiver.cjs"],
+  for (const gesture of ["paste", "drop"] as const) {
+    test(`${gesture} shows upload progress while typing and submission stay live`, async ({
+      page,
+    }, testInfo) => {
+      const gate = await delayImageRequest(page);
+      const terminal = await harness.createTerminal({
+        name: "background-image",
+        command: process.execPath,
+        args: ["image-receiver.cjs"],
+      });
+      try {
+        await harness.openTerminal(page, { terminalId: terminal.id });
+        await expectCapturedImageOutput(harness, terminal.id, "IMAGE_RECEIVER_READY");
+        harness.client.sendTerminalInput(terminal.id, { type: "input", data: "e" });
+        await expectCapturedImageOutput(harness, terminal.id, "IMAGE_ENABLED");
+        const payload = Buffer.from("iVBORw0KGgo=", "base64");
+        if (gesture === "drop") await dispatchImageDrop(page, [payload]);
+        else await dispatchImagePaste(page, payload);
+        await gate.pending;
+        await expect(page.getByTestId("terminal-image-uploading")).toHaveText("Uploading image…");
+        const input = page.locator('[data-testid="terminal-surface"] .xterm-helper-textarea');
+        await input.pressSequentially("describe");
+        await input.press("Enter");
+        await expectCapturedImageOutput(harness, terminal.id, "ENTER_WITHOUT_IMAGE");
+        await page.screenshot({ path: testInfo.outputPath("uploading-image.png") });
+        gate.release();
+        await expectCapturedImageOutput(harness, terminal.id, "IMAGE_STAGED");
+        await expect(page.getByTestId("terminal-image-uploading")).toHaveCount(0);
+      } finally {
+        await harness.killTerminal(terminal.id);
+      }
     });
+  }
+  test("multiple, repeated and mixed image drops deliver remote readable private files", async ({
+    page,
+  }) => {
+    const terminal = await harness.createTerminal({
+      name: "image-drops",
+      command: process.execPath,
+      args: ["image-receiver.cjs", "--read-on-arrival"],
+    });
+    const payloads = [1, 2, 3].map((value) =>
+      Buffer.concat([Buffer.from("iVBORw0KGgo=", "base64"), Buffer.from([value])]),
+    );
     try {
       await harness.openTerminal(page, { terminalId: terminal.id });
       await expectCapturedImageOutput(harness, terminal.id, "IMAGE_RECEIVER_READY");
       harness.client.sendTerminalInput(terminal.id, { type: "input", data: "e" });
       await expectCapturedImageOutput(harness, terminal.id, "IMAGE_ENABLED");
-      await dispatchImagePaste(page, Buffer.from("iVBORw0KGgo=", "base64"));
-      await gate.pending;
-      await expect(page.getByTestId("terminal-image-uploading")).toHaveText("Uploading image…");
-      const input = page.locator('[data-testid="terminal-surface"] .xterm-helper-textarea');
-      await input.pressSequentially("describe");
-      await input.press("Enter");
-      await expectCapturedImageOutput(harness, terminal.id, "ENTER_WITHOUT_IMAGE");
-      await page.screenshot({ path: testInfo.outputPath("uploading-image.png") });
-      gate.release();
-      await expectCapturedImageOutput(harness, terminal.id, "IMAGE_STAGED");
+      await dispatchImageDrop(page, payloads.slice(0, 2), true);
+      await dispatchImageDrop(page, payloads.slice(2));
+      for (const payload of payloads) {
+        await expectCapturedImageOutput(
+          harness,
+          terminal.id,
+          `DROP_READ:${createHash("sha256").update(payload).digest("hex")}:600`,
+        );
+      }
       await expect(page.getByTestId("terminal-image-uploading")).toHaveCount(0);
+      await dispatchImageDrop(page, [Buffer.from("invalid image")]);
+      await expect(page.getByTestId("app-toast-message")).toBeVisible();
+      await page.locator('[data-testid="terminal-surface"] .xterm-helper-textarea').press("Enter");
+      await expectCapturedImageOutput(harness, terminal.id, "ENTER_AFTER_IMAGE");
     } finally {
       await harness.killTerminal(terminal.id);
     }

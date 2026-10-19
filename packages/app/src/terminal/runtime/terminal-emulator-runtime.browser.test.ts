@@ -106,6 +106,7 @@ interface CreateTerminalHostInput {
   scrollback?: number;
   isMac?: boolean;
   onImagePaste?: (image: TerminalImagePasteInput) => Promise<TerminalImagePasteOutcome>;
+  onPasteFailure?: () => void;
 }
 
 function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
@@ -136,6 +137,7 @@ function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
   );
   runtime.setCallbacks({
     callbacks: {
+      onPasteFailure: input.onPasteFailure,
       onInput: (data) => {
         inputs.push(data);
       },
@@ -1072,4 +1074,102 @@ it("pastes ordinary clipboard text while an earlier image is uploading", async (
   await waitFor({ predicate: () => mounted.inputs.length === 1 });
   expect(mounted.inputs).toEqual(["still usable\r"]);
   upload.resolve("injected");
+});
+
+it("orders multiple and repeated image drops through the clipboard upload callback while typing stays live", async () => {
+  const upload = deferred<TerminalImagePasteOutcome>();
+  let calls = 0;
+  const mounted = createTerminalHost({
+    width: 720,
+    height: 360,
+    onImagePaste: () => (++calls === 1 ? upload.promise : Promise.resolve("injected")),
+  });
+  mounted.runtime.dropImages([
+    new File([new Uint8Array([1])], "one.png", { type: "image/png" }),
+    new File([new Uint8Array([2])], "two.jpeg"),
+  ]);
+  mounted.runtime.dropImages([new File([new Uint8Array([3])], "three.png", { type: "image/png" })]);
+  await waitFor({ predicate: () => mounted.images.length === 1 });
+  mounted.runtime.inputRaw("describe\r");
+  expect(mounted.inputs).toEqual(["describe\r"]);
+  upload.resolve("injected");
+  await waitFor({ predicate: () => mounted.images.length === 3 });
+  expect(mounted.images).toEqual([
+    { data: "AQ==", mimeType: "image/png" },
+    { data: "Ag==", mimeType: "image/jpeg" },
+    { data: "Aw==", mimeType: "image/png" },
+  ]);
+  expect(mounted.inputs).toEqual(["describe\r"]);
+});
+
+it("cancels a drop during file reading and discards queued images without touching input", async () => {
+  const read = deferred<ArrayBuffer>();
+  let reading = false;
+  class DelayedFile extends File {
+    override arrayBuffer(): Promise<ArrayBuffer> {
+      reading = true;
+      return read.promise;
+    }
+  }
+  const mounted = createTerminalHost({
+    width: 720,
+    height: 360,
+    onImagePaste: async () => "injected",
+  });
+  mounted.runtime.dropImages([
+    new DelayedFile(["one"], "one.png", { type: "image/png" }),
+    new File(["two"], "two.png", { type: "image/png" }),
+  ]);
+  await waitFor({ predicate: () => reading });
+  mounted.runtime.inputRaw("\x03");
+  read.resolve(new Uint8Array([1]).buffer);
+  await nextFrame();
+  expect(mounted.images).toEqual([]);
+  expect(mounted.inputs).toEqual(["\x03"]);
+});
+
+it("reports unsupported or unreadable dropped images without host clipboard or local path fallback", async () => {
+  let failures = 0;
+  class UnreadableFile extends File {
+    override async arrayBuffer(): Promise<ArrayBuffer> {
+      throw new Error("Cannot read private path");
+    }
+  }
+  const mounted = createTerminalHost({
+    width: 720,
+    height: 360,
+    onImagePaste: async () => "unsupported",
+    onPasteFailure: () => {
+      failures += 1;
+    },
+  });
+  mounted.runtime.dropImages([
+    new File(["gif"], "one.gif", { type: "image/gif" }),
+    new UnreadableFile(["png"], "two.png", { type: "image/png" }),
+    new File([new Uint8Array([1])], "three.png", { type: "image/png" }),
+  ]);
+  await waitFor({ predicate: () => failures === 3 });
+  expect(mounted.images).toEqual([{ data: "AQ==", mimeType: "image/png" }]);
+  expect(mounted.inputs).toEqual([]);
+});
+
+it("continues image drops after an upload failure and preserves already submitted input", async () => {
+  let failures = 0;
+  let calls = 0;
+  const mounted = createTerminalHost({
+    width: 720,
+    height: 360,
+    onImagePaste: async () => (++calls === 1 ? "error" : "injected"),
+    onPasteFailure: () => {
+      failures += 1;
+    },
+  });
+  mounted.runtime.dropImages([
+    new File(["one"], "one.png", { type: "image/png" }),
+    new File(["two"], "two.png", { type: "image/png" }),
+  ]);
+  mounted.runtime.inputRaw("\r");
+  await waitFor({ predicate: () => mounted.images.length === 2 });
+  expect(failures).toBe(1);
+  expect(mounted.inputs).toEqual(["\r"]);
 });

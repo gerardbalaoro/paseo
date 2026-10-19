@@ -1,3 +1,4 @@
+import { terminalDropImageMimeType } from "../drop/terminal-file-drop";
 import { TerminalPasteQueue } from "@getpaseo/protocol/terminal-paste-queue";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
@@ -989,22 +990,49 @@ export class TerminalEmulatorRuntime {
     });
   }
 
+  /** Dropped images share clipboard upload ordering, cancellation and error reporting.
+   * A drop must never fall back to reading the host clipboard or inserting a client path.
+   */
+  dropImages(files: readonly File[]): void {
+    for (const file of files) {
+      void this.pasteQueue.paste((signal) =>
+        this.forwardClipboardImage({
+          readImage: async () => {
+            const mimeType = terminalDropImageMimeType(file);
+            if (!mimeType || file.size > 10 * 1024 * 1024) return null;
+            const data = encodeBase64(new Uint8Array(await file.arrayBuffer()));
+            return { data, mimeType };
+          },
+          input: (data) => {
+            void this.callbacks.onInput?.(data);
+          },
+          signal,
+          allowClipboardFallback: false,
+        }),
+      );
+    }
+  }
+
   private async forwardClipboardImage(input: {
     readImage: () => Promise<TerminalImagePasteInput | null>;
     input: (data: string) => void;
     signal: AbortSignal;
+    allowClipboardFallback?: boolean;
   }): Promise<boolean> {
     const onImagePaste = this.callbacks.onImagePaste;
     const image = onImagePaste ? await input.readImage().catch(() => null) : null;
     if (input.signal.aborted) return false;
     if (!onImagePaste || !image) {
+      if (input.allowClipboardFallback === false) return false;
       input.input(TERMINAL_IMAGE_PASTE_KEYSTROKE);
       return true;
     }
     const outcome = await onImagePaste(image).catch(() => "error" as const);
     if (input.signal.aborted && outcome !== "injected") return false;
-    if (outcome === "written" || outcome === "unsupported")
+    if (outcome === "written" || outcome === "unsupported") {
+      if (input.allowClipboardFallback === false) return false;
       input.input(TERMINAL_IMAGE_PASTE_KEYSTROKE);
+    }
     return outcome !== "error";
   }
 

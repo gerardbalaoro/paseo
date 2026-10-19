@@ -54,18 +54,18 @@ describe("terminal file drop", () => {
   });
 
   it("extracts paths through Electron webUtils", () => {
-    const file = fakeFile({ name: "photo.png" });
-    const getPathForFile = vi.fn(() => "/Users/me/Desktop/photo.png");
+    const file = fakeFile({ name: "notes.txt" });
+    const getPathForFile = vi.fn(() => "/Users/me/Desktop/notes.txt");
     const bridge: DesktopHostBridge = { webUtils: { getPathForFile } };
 
     expect(
       extractTerminalDropPaths(dataTransfer({ types: ["Files"], files: [file] }), bridge),
-    ).toEqual(["/Users/me/Desktop/photo.png"]);
+    ).toEqual(["/Users/me/Desktop/notes.txt"]);
     expect(getPathForFile).toHaveBeenCalledWith(file);
   });
 
   it("falls back to legacy Electron file paths", () => {
-    const file = fakeFile({ name: "photo.png", legacyPath: "/tmp/legacy-photo.png" });
+    const file = fakeFile({ name: "notes.txt", legacyPath: "/tmp/legacy-notes.txt" });
     const bridge: DesktopHostBridge = {
       webUtils: {
         getPathForFile: vi.fn(() => {
@@ -76,11 +76,11 @@ describe("terminal file drop", () => {
 
     expect(
       extractTerminalDropPaths(dataTransfer({ types: ["Files"], files: [file] }), bridge),
-    ).toEqual(["/tmp/legacy-photo.png"]);
+    ).toEqual(["/tmp/legacy-notes.txt"]);
   });
 
   it("drops browser files that have no filesystem path", () => {
-    const file = fakeFile({ name: "photo.png" });
+    const file = fakeFile({ name: "notes.txt" });
 
     expect(
       extractTerminalDropPaths(dataTransfer({ types: ["Files"], files: [file] }), null),
@@ -115,4 +115,17 @@ describe("terminal file drop", () => {
       "'/tmp/a.png' '/tmp/b c.png'",
     );
   });
+});
+
+it("never inserts client-local image paths from mixed drops", () => {
+  const files = [
+    new File(["png"], "photo.PNG", { type: "image/png" }),
+    new File(["jpeg"], "photo.jpeg"),
+    new File(["gif"], "animation.gif", { type: "image/gif" }),
+    new File(["text"], "notes.txt", { type: "text/plain" }),
+  ];
+  const bridge: DesktopHostBridge = {
+    webUtils: { getPathForFile: (file) => `/client/${file.name}` },
+  };
+  expect(extractTerminalDropPaths(dataTransfer({ files }), bridge)).toEqual(["/client/notes.txt"]);
 });

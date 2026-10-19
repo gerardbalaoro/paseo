@@ -43,6 +43,7 @@ import { openExternalUrl } from "../utils/open-external-url";
 import { focusWithRetries } from "../utils/web-focus";
 import {
   extractTerminalDropPaths,
+  isTerminalImageFile,
   isTerminalDragLeaveOutside,
   isTerminalFileDrag,
   prepareDroppedPathsForTerminal,
@@ -670,13 +671,12 @@ export default function TerminalEmulator({
       clearTerminalDropActive();
 
       const bridge = getDesktopHost();
+      const images = Array.from(event.dataTransfer?.files ?? []).filter(isTerminalImageFile);
       const paths = extractTerminalDropPaths(event.dataTransfer, bridge);
-      if (paths.length === 0) {
-        return;
-      }
-
       runtimeRef.current?.focus();
-      mountCallbacksRef.current.onInput?.(prepareDroppedPathsForTerminal(paths, bridge));
+      runtimeRef.current?.dropImages(images);
+      if (paths.length > 0)
+        mountCallbacksRef.current.onInput?.(prepareDroppedPathsForTerminal(paths, bridge));
     };
 
     root.addEventListener("dragenter", handleDragEnter, { capture: true });
