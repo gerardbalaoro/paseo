@@ -1154,8 +1154,8 @@ it("checks live paste modes after attachment and acknowledges injection or rejec
   expect(session.getReplayPreamble()).not.toContain("\x1b[?2004h");
   session.send({ type: "input", data: "e" });
   await waitForCondition(() => output.includes("ENABLED"), 5000);
-  // Ordinary output has not updated the replay cache. Paste must consult the worker.
-  expect(session.getReplayPreamble()).not.toContain("\x1b[?2004h");
+  // Streamed output now refreshes the cache; injection still checks the worker mode.
+  expect(session.getReplayPreamble()).toContain("\x1b[?2004h");
   await session.paste("image.png");
   await waitForCondition(
     () => output.includes("HEX:" + Buffer.from("\x1b[200~image.png\x1b[201~").toString("hex")),
@@ -1165,7 +1165,7 @@ it("checks live paste modes after attachment and acknowledges injection or rejec
   expect(session.getReplayPreamble()).toContain("\x1b[?2004h");
   session.send({ type: "input", data: "d" });
   await waitForCondition(() => output.includes("DISABLED"), 5000);
-  expect(session.getReplayPreamble()).toContain("\x1b[?2004h");
+  expect(session.getReplayPreamble()).not.toContain("\x1b[?2004h");
   await expect(session.paste("rejected.png")).rejects.toThrow("stopped accepting file paste");
   await session.killAndWait({ gracefulTimeoutMs: 500, forceTimeoutMs: 500 });
   await expect(session.paste("closed.png")).rejects.toThrow("Terminal closed");
