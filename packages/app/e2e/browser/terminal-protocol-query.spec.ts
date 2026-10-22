@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../support/fixtures";
 import { holdFileUploadResponse } from "../support/helpers/file-upload-gate";
+import { installLocalDesktopHost } from "../support/helpers/local-desktop-host";
 import { TerminalE2EHarness } from "../support/helpers/terminal-dsl";
 import { getTerminalBufferText, waitForTerminalContent } from "../support/helpers/terminal-perf";
 
@@ -136,40 +137,6 @@ function terminalDropOverlay(page: Page) {
  * Makes the app treat the e2e daemon as the desktop app's own daemon, so dropped
  * files resolve to paths inside `directory` instead of uploading.
  */
-async function installLocalDesktopHost(page: Page, directory: string): Promise<void> {
-  const serverId = process.env.E2E_SERVER_ID;
-  if (!serverId) {
-    throw new Error("E2E_SERVER_ID is not set");
-  }
-  await page.addInitScript(
-    (localHost: { serverId: string; directory: string }) => {
-      (window as unknown as { paseoDesktop: unknown }).paseoDesktop = {
-        platform: "linux",
-        invoke: async (command: string) => {
-          if (command === "desktop_daemon_status") {
-            return {
-              serverId: localHost.serverId,
-              status: "running",
-              listen: null,
-              hostname: null,
-              pid: null,
-              home: "",
-              version: null,
-              desktopManaged: true,
-              error: null,
-            };
-          }
-          return null;
-        },
-        getPendingOpenProject: async () => null,
-        events: { on: async () => () => undefined },
-        webUtils: { getPathForFile: (file: File) => `${localHost.directory}/${file.name}` },
-      };
-    },
-    { serverId, directory },
-  );
-}
-
 async function typeLine(page: Page, text: string): Promise<void> {
   await terminalInput(page).pressSequentially(text);
   await terminalInput(page).press("Enter");
