@@ -853,7 +853,7 @@ export function TerminalPane({
     imagePastes.add(image, {
       upload: async (file) => {
         if (!client || !isConnected) {
-          throw new Error("Host is not connected");
+          throw new Error(t("workspace.terminal.hostDisconnected"));
         }
         const response = await client.uploadFile(file);
         if (!response.file) {
