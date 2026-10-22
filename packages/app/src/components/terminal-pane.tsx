@@ -46,6 +46,7 @@ import {
 import { encodeTerminalPaste, pasteTerminalClipboard } from "@/terminal/runtime/terminal-paste";
 import {
   TerminalImagePasteQueue,
+  TerminalImageTooLargeError,
   terminalImageFromBase64,
   type TerminalImage,
 } from "@/terminal/image-paste";
@@ -331,7 +332,11 @@ export function TerminalPane({
     toast.show(t("workspace.terminal.imageUploaded"), { variant: "success" });
   });
   const reportImagePasteFailure = useStableEvent((error: unknown) => {
-    toast.error(t("workspace.terminal.pasteImageFailed", { reason: toErrorMessage(error) }));
+    const reason =
+      error instanceof TerminalImageTooLargeError
+        ? t("composer.errors.fileTooLarge", { size: "50MB", fileName: error.fileName })
+        : toErrorMessage(error);
+    toast.error(t("workspace.terminal.pasteImageFailed", { reason }));
   });
   const [imagePastes] = useState(
     () =>

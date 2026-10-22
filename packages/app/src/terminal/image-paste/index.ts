@@ -1,5 +1,4 @@
 import { FILE_UPLOAD_MAX_BYTES } from "@/attachments/upload-limit";
-import { i18n } from "@/i18n/i18next";
 import { prepareTerminalPath } from "../drop/terminal-file-drop";
 
 /** Image bytes from a paste or drop gesture, before they become a file on the host. */
@@ -7,6 +6,13 @@ export interface TerminalImage {
   fileName: string;
   mimeType: string;
   bytes: Uint8Array;
+}
+
+/** An image over the file upload limit; the pane words it for the user. */
+export class TerminalImageTooLargeError extends Error {
+  constructor(readonly fileName: string) {
+    super(`${fileName} exceeds the upload limit`);
+  }
 }
 
 /** The pane's host and terminal: where an image is stored and where its path is pasted. */
@@ -64,9 +70,7 @@ export class TerminalImagePasteQueue {
         return;
       }
       if (image.bytes.byteLength > FILE_UPLOAD_MAX_BYTES) {
-        throw new Error(
-          i18n.t("composer.errors.fileTooLarge", { size: "50MB", fileName: image.fileName }),
-        );
+        throw new TerminalImageTooLargeError(image.fileName);
       }
       this.setUploading(true);
       const path = await target.upload({ ...image, fileName: toShellSafeFileName(image.fileName) });

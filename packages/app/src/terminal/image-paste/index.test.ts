@@ -138,7 +138,7 @@ describe("terminal image paste queue", () => {
     queue.add(Promise.resolve(oversized), host);
     await settle();
 
-    expect(events.failures).toEqual(["unreadable", "big.png is too large (max 50MB)"]);
+    expect(events.failures).toEqual(["unreadable", "big.png exceeds the upload limit"]);
     expect(host.uploads).toEqual([]);
   });
 
