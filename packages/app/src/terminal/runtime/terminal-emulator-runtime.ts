@@ -33,7 +33,7 @@ import {
 import { isFindShortcut, type FindShortcutPlatform } from "@/pane-find/find-shortcut";
 import { isMacUserAgent } from "@/utils/mac-user-agent";
 import { resolveTerminalFontFamily, resolveTerminalFontSize } from "./terminal-font";
-import { imageExtension, readTerminalImageFile, type TerminalImage } from "../image-paste";
+import { imageExtension, readTerminalFile, type TerminalFile } from "../file-paste";
 
 export type TerminalOutputData = Uint8Array;
 
@@ -84,8 +84,8 @@ export interface TerminalEmulatorRuntimeCallbacks {
     disposition: "main" | "side",
   ) => Promise<void> | void;
   onInputModeChange?: (state: TerminalInputModeState) => Promise<void> | void;
-  /** A paste or drop gesture that can carry an image; resolves to null when it carried none. */
-  onImagePaste?: (image: Promise<TerminalImage | null>) => void;
+  /** A paste gesture that can carry a file; resolves to null when it carried none. */
+  onFilePaste?: (file: Promise<TerminalFile | null>) => void;
 }
 
 export interface TerminalResizeEvent {
@@ -125,7 +125,7 @@ interface TerminalEmulatorRuntimeDisposables {
   clearFitTimeouts: () => void;
   removeFontListeners: () => void;
   removeTouchListeners: () => void;
-  removeImagePasteListener: () => void;
+  removeFilePasteListener: () => void;
   restoreDocumentStyles: () => void;
   restoreViewportStyles: () => void;
   disposeFitAddon: () => void;
@@ -196,7 +196,7 @@ const browserClipboard: TerminalClipboard = {
   writeText: (text) => navigator.clipboard.writeText(text),
 };
 
-async function readClipboardImage(clipboard: TerminalClipboard): Promise<TerminalImage | null> {
+async function readClipboardImage(clipboard: TerminalClipboard): Promise<TerminalFile | null> {
   for (const item of await clipboard.read()) {
     const mimeType = item.types.find((type) => type.startsWith("image/"));
     if (mimeType) {
@@ -211,13 +211,13 @@ async function readClipboardImage(clipboard: TerminalClipboard): Promise<Termina
   return null;
 }
 
-/** The image of a paste that carries no text. xterm would paste it as empty text. */
-function findImageOnlyPaste(transfer: DataTransfer | null): File | null {
+/** The file of a paste that carries no text. xterm would paste it as empty text. */
+function findFileOnlyPaste(transfer: DataTransfer | null): File | null {
   if (!transfer || transfer.getData("text/plain").length > 0) {
     return null;
   }
   for (const item of Array.from(transfer.items)) {
-    if (item.kind === "file" && item.type.startsWith("image/")) {
+    if (item.kind === "file") {
       return item.getAsFile();
     }
   }
@@ -708,19 +708,19 @@ export class TerminalEmulatorRuntime {
 
     this.attachKeyEventHandler(terminal);
 
-    // Cmd+V and context-menu paste arrive as DOM paste events. Take image-only
+    // Cmd+V and context-menu paste arrive as DOM paste events. Take file-only
     // pastes before xterm's own listener consumes them as empty text.
-    const imagePasteHandler = (event: ClipboardEvent): void => {
-      const onImagePaste = this.callbacks.onImagePaste;
-      const file = findImageOnlyPaste(event.clipboardData);
-      if (!onImagePaste || !file) {
+    const filePasteHandler = (event: ClipboardEvent): void => {
+      const onFilePaste = this.callbacks.onFilePaste;
+      const file = findFileOnlyPaste(event.clipboardData);
+      if (!onFilePaste || !file) {
         return;
       }
       event.preventDefault();
       event.stopPropagation();
-      onImagePaste(readTerminalImageFile(file));
+      onFilePaste(readTerminalFile(file));
     };
-    input.host.addEventListener("paste", imagePasteHandler, true);
+    input.host.addEventListener("paste", filePasteHandler, true);
 
     const removeTouchListeners = this.setupTouchScrollHandlers({
       root: input.root,
@@ -811,8 +811,8 @@ export class TerminalEmulatorRuntime {
         fontSet?.removeEventListener?.("loadingdone", fontReadyHandler);
       },
       removeTouchListeners,
-      removeImagePasteListener: () => {
-        input.host.removeEventListener("paste", imagePasteHandler, true);
+      removeFilePasteListener: () => {
+        input.host.removeEventListener("paste", filePasteHandler, true);
       },
       restoreDocumentStyles,
       restoreViewportStyles,
@@ -843,7 +843,7 @@ export class TerminalEmulatorRuntime {
       disposables.clearFitTimeouts();
       disposables.removeFontListeners();
       disposables.removeTouchListeners();
-      disposables.removeImagePasteListener();
+      disposables.removeFilePasteListener();
       disposables.disposeFitAddon();
       disposables.disposeWebglAddon();
       disposables.disposeTerminal();
@@ -886,16 +886,16 @@ export class TerminalEmulatorRuntime {
 
   private pasteClipboard(terminal: Pick<Terminal, "paste">): void {
     const text = this.clipboard.readText().catch(() => "");
-    const onImagePaste = this.callbacks.onImagePaste;
-    // Report the gesture now so it keeps its place among earlier image pastes.
-    const image = text.then((value) => {
+    const onFilePaste = this.callbacks.onFilePaste;
+    // Report the gesture now so it keeps its place among earlier file pastes.
+    const file = text.then((value) => {
       if (value) {
         terminal.paste(value);
         return null;
       }
-      return onImagePaste ? readClipboardImage(this.clipboard).catch(() => null) : null;
+      return onFilePaste ? readClipboardImage(this.clipboard).catch(() => null) : null;
     });
-    onImagePaste?.(image);
+    onFilePaste?.(file);
   }
 
   renderSnapshot(input: { state: TerminalState | null; onCommitted?: () => void }): void {

@@ -612,9 +612,9 @@ export const en = {
       hostDisconnected: "Host is not connected",
       updateHost: "Update the host to use the native terminal renderer.",
       unableToSubscribe: "Unable to subscribe to terminal",
-      imageUploaded: "Image uploaded",
-      pasteImageFailed: "Failed to paste image: {{reason}}",
-      uploadingImage: "Uploading image…",
+      fileUploaded: "File uploaded",
+      pasteFileFailed: "Failed to paste file: {{reason}}",
+      uploadingFile: "Uploading file…",
     },
     sheet: {
       openAsTab: "Open as tab",

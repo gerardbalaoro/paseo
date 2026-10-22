@@ -79,7 +79,7 @@ test("the generated WebView searches its mounted stream and keeps Find commands 
   send({ type: "unmount" });
 });
 
-test("the generated WebView forwards image-only pastes to native as image bytes", async () => {
+test("the generated WebView forwards file-only pastes to native as file bytes", async () => {
   const { win, send, messages } = await mountWebView();
   const clipboardData = new DataTransfer();
   clipboardData.items.add(
@@ -91,9 +91,9 @@ test("the generated WebView forwards image-only pastes to native as image bytes"
     .dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
 
   await expect
-    .poll(() => messages.find((m) => m.type === "imagePaste"))
+    .poll(() => messages.find((m) => m.type === "filePaste"))
     .toEqual({
-      type: "imagePaste",
+      type: "filePaste",
       streamKey: "owned",
       fileName: "image.png",
       mimeType: "image/png",

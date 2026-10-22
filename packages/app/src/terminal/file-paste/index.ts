@@ -1,50 +1,51 @@
+// Bundled into the terminal WebView as well as the app: keep i18n and React out.
 import { FILE_UPLOAD_MAX_BYTES } from "@/attachments/upload-limit";
-import { prepareTerminalPath } from "../drop/terminal-file-drop";
+import { prepareTerminalPath } from "../drop/terminal-path";
 
-/** Image bytes from a paste or drop gesture, before they become a file on the host. */
-export interface TerminalImage {
+/** File bytes from a paste or drop gesture, before they become a file on the host. */
+export interface TerminalFile {
   fileName: string;
   mimeType: string;
   bytes: Uint8Array;
 }
 
-/** An image over the file upload limit; the pane words it for the user. */
-export class TerminalImageTooLargeError extends Error {
+/** A file over the upload limit; the pane words it for the user. */
+export class TerminalFileTooLargeError extends Error {
   constructor(readonly fileName: string) {
     super(`${fileName} exceeds the upload limit`);
   }
 }
 
-/** The pane's host and terminal: where an image is stored and where its path is pasted. */
-export interface TerminalImagePasteTarget {
-  /** Stores the image on the host and returns its host path. */
-  upload(image: TerminalImage): Promise<string>;
+/** The pane's host and terminal: where a file is stored and where its path is pasted. */
+export interface TerminalFilePasteTarget {
+  /** Stores the file on the host and returns its host path. */
+  upload(file: TerminalFile): Promise<string>;
   paste(text: string): void;
 }
 
-interface TerminalImagePasteEvents {
+interface TerminalFilePasteEvents {
   onUploadingChange(uploading: boolean): void;
   onUploaded(): void;
   onFailure(error: unknown): void;
 }
 
 /**
- * Turns a pane's image gestures into pasted host paths, one at a time and in
+ * Turns a pane's file gestures into pasted host paths, one at a time and in
  * gesture order. Ordinary input never waits on it.
  */
-export class TerminalImagePasteQueue {
+export class TerminalFilePasteQueue {
   private tail: Promise<void> = Promise.resolve();
   private generation = 0;
   private pending = 0;
   private uploading = false;
 
-  constructor(private readonly events: TerminalImagePasteEvents) {}
+  constructor(private readonly events: TerminalFilePasteEvents) {}
 
-  /** Queues a gesture. `image` resolves to null when the gesture carried no image. */
-  add(image: Promise<TerminalImage | null>, target: TerminalImagePasteTarget): void {
+  /** Queues a gesture. `file` resolves to null when the gesture carried no file. */
+  add(file: Promise<TerminalFile | null>, target: TerminalFilePasteTarget): void {
     const generation = this.generation;
     this.pending += 1;
-    this.tail = this.tail.then(() => this.paste(image, target, generation));
+    this.tail = this.tail.then(() => this.paste(file, target, generation));
   }
 
   /** Drops queued and in-flight gestures. Returns whether any were dropped. */
@@ -59,21 +60,21 @@ export class TerminalImagePasteQueue {
   }
 
   private async paste(
-    read: Promise<TerminalImage | null>,
-    target: TerminalImagePasteTarget,
+    read: Promise<TerminalFile | null>,
+    target: TerminalFilePasteTarget,
     generation: number,
   ): Promise<void> {
     const isCurrent = () => generation === this.generation;
     try {
-      const image = await read;
-      if (!image || !isCurrent()) {
+      const file = await read;
+      if (!file || !isCurrent()) {
         return;
       }
-      if (image.bytes.byteLength > FILE_UPLOAD_MAX_BYTES) {
-        throw new TerminalImageTooLargeError(image.fileName);
+      if (file.bytes.byteLength > FILE_UPLOAD_MAX_BYTES) {
+        throw new TerminalFileTooLargeError(file.fileName);
       }
       this.setUploading(true);
-      const path = await target.upload({ ...image, fileName: toShellSafeFileName(image.fileName) });
+      const path = await target.upload({ ...file, fileName: toShellSafeFileName(file.fileName) });
       if (isCurrent()) {
         target.paste(prepareTerminalPath(path));
         this.events.onUploaded();
@@ -104,21 +105,19 @@ function toShellSafeFileName(fileName: string): string {
   return fileName.replace(/[^\w.-]/g, "_");
 }
 
-export async function readTerminalImageFile(
-  file: Blob & { name?: string },
-): Promise<TerminalImage> {
+export async function readTerminalFile(file: File): Promise<TerminalFile> {
   return {
-    fileName: file.name || `image.${imageExtension(file.type)}`,
+    fileName: file.name,
     mimeType: file.type,
     bytes: new Uint8Array(await file.arrayBuffer()),
   };
 }
 
-export function terminalImageFromBase64(input: {
+export function terminalFileFromBase64(input: {
   fileName: string;
   mimeType: string;
   data: string;
-}): TerminalImage {
+}): TerminalFile {
   const binary = atob(input.data);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
@@ -129,14 +128,15 @@ export function terminalImageFromBase64(input: {
 
 const BASE64_CHUNK_SIZE = 0x8000;
 
-export function terminalImageToBase64(image: TerminalImage): string {
+export function terminalFileToBase64(file: TerminalFile): string {
   let binary = "";
-  for (let offset = 0; offset < image.bytes.length; offset += BASE64_CHUNK_SIZE) {
-    binary += String.fromCharCode(...image.bytes.subarray(offset, offset + BASE64_CHUNK_SIZE));
+  for (let offset = 0; offset < file.bytes.length; offset += BASE64_CHUNK_SIZE) {
+    binary += String.fromCharCode(...file.bytes.subarray(offset, offset + BASE64_CHUNK_SIZE));
   }
   return btoa(binary);
 }
 
+/** File extension for a clipboard image, which arrives as bytes with only a MIME type. */
 export function imageExtension(mimeType: string): string {
   const subtype = mimeType.split("/")[1]?.split(/[+;]/)[0] ?? "";
   if (subtype === "jpeg") {

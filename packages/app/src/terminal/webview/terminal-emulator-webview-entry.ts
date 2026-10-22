@@ -12,7 +12,7 @@ import type {
   TerminalLocalFileLinkSource,
   TerminalLocalFileLinkTarget,
 } from "../local-links/terminal-local-link-provider";
-import { terminalImageToBase64, type TerminalImage } from "../image-paste";
+import { terminalFileToBase64, type TerminalFile } from "../file-paste";
 
 interface MountMessage {
   type: "mount";
@@ -77,7 +77,7 @@ type OutboundMessage =
   | { type: "pendingModifiersConsumed"; streamKey: string }
   | { type: "inputModeChange"; streamKey: string; state: TerminalInputModeState }
   | { type: "openExternalUrl"; streamKey: string; url: string }
-  | { type: "imagePaste"; streamKey: string; fileName: string; mimeType: string; data: string }
+  | { type: "filePaste"; streamKey: string; fileName: string; mimeType: string; data: string }
   | {
       type: "resolveLocalFileLink";
       streamKey: string;
@@ -184,7 +184,7 @@ class TerminalWebViewBridge {
     number,
     (target: TerminalLocalFileLinkTarget | null) => void
   >();
-  private imagePastes: Promise<void> = Promise.resolve();
+  private filePastes: Promise<void> = Promise.resolve();
   private swipeGesturesEnabled = false;
   private trackingSwipe = false;
   private activePointerId: number | null = null;
@@ -356,7 +356,7 @@ class TerminalWebViewBridge {
             target,
             disposition,
           }),
-        onImagePaste: (image) => this.forwardImagePaste(message.streamKey, image),
+        onFilePaste: (file) => this.forwardFilePaste(message.streamKey, file),
       },
     });
     runtime.setPendingModifiers({ pendingModifiers: message.pendingModifiers });
@@ -398,23 +398,23 @@ class TerminalWebViewBridge {
     }
   }
 
-  // Forward in gesture order: an earlier image can finish reading after a later one.
-  private forwardImagePaste(streamKey: string, image: Promise<TerminalImage | null>): void {
-    this.imagePastes = this.imagePastes.then(() => this.sendImagePaste(streamKey, image));
+  // Forward in gesture order: an earlier file can finish reading after a later one.
+  private forwardFilePaste(streamKey: string, file: Promise<TerminalFile | null>): void {
+    this.filePastes = this.filePastes.then(() => this.sendFilePaste(streamKey, file));
   }
 
-  private async sendImagePaste(
+  private async sendFilePaste(
     streamKey: string,
-    image: Promise<TerminalImage | null>,
+    file: Promise<TerminalFile | null>,
   ): Promise<void> {
-    const read = await image.catch(() => null);
+    const read = await file.catch(() => null);
     if (read && this.matches(streamKey)) {
       sendToNative({
-        type: "imagePaste",
+        type: "filePaste",
         streamKey,
         fileName: read.fileName,
         mimeType: read.mimeType,
-        data: terminalImageToBase64(read),
+        data: terminalFileToBase64(read),
       });
     }
   }

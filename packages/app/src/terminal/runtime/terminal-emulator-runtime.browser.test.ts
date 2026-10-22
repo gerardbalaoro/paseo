@@ -1,7 +1,7 @@
 import { page, userEvent } from "@vitest/browser/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TerminalInputModeState } from "@getpaseo/protocol/terminal-input-mode";
-import type { TerminalImage } from "../image-paste";
+import type { TerminalFile } from "../file-paste";
 import {
   encodeTerminalOutput,
   TerminalEmulatorRuntime,
@@ -47,7 +47,7 @@ interface MountedTerminal {
   inputModeChanges: TerminalInputModeState[];
   openedUrls: string[];
   clipboard: FakeClipboard;
-  imagePastes: Promise<TerminalImage | null>[];
+  filePastes: Promise<TerminalFile | null>[];
 }
 
 class FakeClipboard implements TerminalClipboard {
@@ -136,7 +136,7 @@ function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
   const inputModeChanges: TerminalInputModeState[] = [];
   const openedUrls: string[] = [];
   const clipboard = new FakeClipboard();
-  const imagePastes: Promise<TerminalImage | null>[] = [];
+  const filePastes: Promise<TerminalFile | null>[] = [];
   const runtime = new TerminalEmulatorRuntime(
     input.isMac === undefined ? undefined : { isMac: input.isMac },
     clipboard,
@@ -158,8 +158,8 @@ function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
       onOpenExternalUrl: (url) => {
         openedUrls.push(url);
       },
-      onImagePaste: (image) => {
-        imagePastes.push(image);
+      onFilePaste: (file) => {
+        filePastes.push(file);
       },
     },
   });
@@ -185,7 +185,7 @@ function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
     inputModeChanges,
     openedUrls,
     clipboard,
-    imagePastes,
+    filePastes,
   };
   mountedTerminals.push(mounted);
   return mounted;
@@ -464,21 +464,21 @@ describe("terminal emulator runtime in a real browser", () => {
 
     dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
 
-    expect(mounted.imagePastes).toHaveLength(1);
-    await expect(mounted.imagePastes[0]).resolves.toBeNull();
+    expect(mounted.filePastes).toHaveLength(1);
+    await expect(mounted.filePastes[0]).resolves.toBeNull();
     expect(mounted.inputs).toEqual(["clipboard text"]);
     expect(mounted.clipboard.imageReads).toBe(0);
   });
 
-  it("hands the clipboard image to onImagePaste on Ctrl+V when there is no text", async () => {
+  it("hands the clipboard image to onFilePaste on Ctrl+V when there is no text", async () => {
     const mounted = createTerminalHost({ width: 720, height: 360, isMac: false });
     await waitFor({ predicate: () => mounted.sizes.length > 0 });
     mounted.clipboard.image = { mimeType: "image/jpeg", bytes: [1, 2, 3] };
 
     dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
 
-    expect(mounted.imagePastes).toHaveLength(1);
-    await expect(mounted.imagePastes[0]).resolves.toEqual({
+    expect(mounted.filePastes).toHaveLength(1);
+    await expect(mounted.filePastes[0]).resolves.toEqual({
       fileName: "clipboard.jpg",
       mimeType: "image/jpeg",
       bytes: new Uint8Array([1, 2, 3]),
@@ -486,7 +486,7 @@ describe("terminal emulator runtime in a real browser", () => {
     expect(mounted.inputs).toEqual([]);
   });
 
-  it("takes image-only paste events at xterm's input before xterm pastes empty text", async () => {
+  it("takes file-only paste events at xterm's input before xterm pastes empty text", async () => {
     const mounted = createTerminalHost({ width: 720, height: 360 });
     await waitFor({ predicate: () => mounted.sizes.length > 0 });
     const transfer = new DataTransfer();
@@ -500,8 +500,8 @@ describe("terminal emulator runtime in a real browser", () => {
     mounted.host.querySelector(".xterm-helper-textarea")!.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(true);
-    expect(mounted.imagePastes).toHaveLength(1);
-    await expect(mounted.imagePastes[0]).resolves.toEqual({
+    expect(mounted.filePastes).toHaveLength(1);
+    await expect(mounted.filePastes[0]).resolves.toEqual({
       fileName: "shot.png",
       mimeType: "image/png",
       bytes: new Uint8Array([1, 2, 3]),
@@ -525,7 +525,7 @@ describe("terminal emulator runtime in a real browser", () => {
 
     await waitFor({ predicate: () => mounted.inputs.length > 0 });
     expect(mounted.inputs).toEqual(["echo hi"]);
-    expect(mounted.imagePastes).toEqual([]);
+    expect(mounted.filePastes).toEqual([]);
   });
 
   it("refreshes visible rows on a forced same-size resize", async () => {

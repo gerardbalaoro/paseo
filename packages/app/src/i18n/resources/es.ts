@@ -621,9 +621,9 @@ export const es: TranslationResources = {
       hostDisconnected: "Hostno está conectado",
       updateHost: "Actualiza el host para usar el renderizador de terminal nativo.",
       unableToSubscribe: "No se puede suscribir al terminal",
-      imageUploaded: "Imagen subida",
-      pasteImageFailed: "No se pudo pegar la imagen: {{reason}}",
-      uploadingImage: "Subiendo imagen…",
+      fileUploaded: "Archivo subido",
+      pasteFileFailed: "No se pudo pegar el archivo: {{reason}}",
+      uploadingFile: "Subiendo archivo…",
     },
     sheet: {
       openAsTab: "Abrir como pestaña",

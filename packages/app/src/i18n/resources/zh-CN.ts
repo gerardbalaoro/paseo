@@ -615,9 +615,9 @@ export const zhCN: TranslationResources = {
       hostDisconnected: "Host 未连接",
       updateHost: "请更新主机以使用原生终端渲染器。",
       unableToSubscribe: "无法订阅 Terminal",
-      imageUploaded: "图片已上传",
-      pasteImageFailed: "无法粘贴图片：{{reason}}",
-      uploadingImage: "正在上传图片…",
+      fileUploaded: "文件已上传",
+      pasteFileFailed: "无法粘贴文件：{{reason}}",
+      uploadingFile: "正在上传文件…",
     },
     sheet: {
       openAsTab: "作为标签页打开",

@@ -29,24 +29,26 @@ process.stdin.on("data", (chunk) => {
 setTimeout(finish, 700);
 `;
 
-// A TUI stand-in: turns on bracketed paste, reads every pasted quoted path, and
-// echoes typed lines, so the PTY output proves what reached the terminal.
-const IMAGE_RECEIVER_SCRIPT = String.raw`
+// A TUI stand-in: turns on bracketed paste, reads every quoted path in each
+// bracketed paste, and echoes typed lines, so the PTY output proves what reached
+// the terminal and where the file was read from.
+const FILE_RECEIVER_SCRIPT = String.raw`
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 let buffer = "";
 process.stdin.setRawMode(true);
 process.stdin.resume();
-process.stdout.write("\x1b[?2004hIMAGE_RECEIVER_READY\r\n");
+process.stdout.write("\x1b[?2004hFILE_RECEIVER_READY\r\n");
 process.stdin.on("data", (chunk) => {
   buffer += chunk.toString();
   for (;;) {
-    const paste = /(\x1b\[200~)?'([^']*)'(\x1b\[201~)?/.exec(buffer);
-    if (!paste || (paste[1] && !paste[3])) break;
-    const digest = crypto.createHash("sha256").update(fs.readFileSync(paste[2])).digest("hex");
-    const location = /[\\/]uploads[\\/]upload_/.test(paste[2]) ? "upload" : "elsewhere";
-    const mode = paste[1] ? "bracketed" : "plain";
-    process.stdout.write("IMAGE_READ:" + digest + ":" + location + ":" + mode + "\r\n");
+    const paste = /\x1b\[200~([^]*?)\x1b\[201~/.exec(buffer);
+    if (!paste) break;
+    for (const [, path] of paste[1].matchAll(/'([^']*)'/g)) {
+      const digest = crypto.createHash("sha256").update(fs.readFileSync(path)).digest("hex");
+      const location = /[\\/]uploads[\\/]upload_/.test(path) ? "upload" : "local";
+      process.stdout.write("FILE_READ:" + digest + ":" + location + "\r\n");
+    }
     buffer = buffer.slice(0, paste.index) + buffer.slice(paste.index + paste[0].length);
   }
   if (buffer.includes("\x03")) {
@@ -65,9 +67,9 @@ function pngBytes(seed: number): Buffer {
   return Buffer.concat([Buffer.from("iVBORw0KGgo=", "base64"), Buffer.from([seed])]);
 }
 
-function imageRead(bytes: Buffer): string {
+function fileRead(bytes: Buffer, location: "upload" | "local"): string {
   const digest = createHash("sha256").update(bytes).digest("hex");
-  return `IMAGE_READ:${digest}:upload:bracketed`;
+  return `FILE_READ:${digest}:${location}`;
 }
 
 function terminalInput(page: Page) {
@@ -88,20 +90,83 @@ async function pasteImage(page: Page, bytes: Buffer): Promise<void> {
   );
 }
 
-async function dropFiles(page: Page, files: Array<{ name: string; type: string; bytes: Buffer }>) {
-  await terminalInput(page).evaluate(
-    (element, entries) => {
+interface DroppedFile {
+  name: string;
+  type: string;
+  bytes: Buffer;
+}
+
+async function dragTransfer(page: Page, files: DroppedFile[]) {
+  return await page.evaluateHandle(
+    (entries) => {
       const dataTransfer = new DataTransfer();
       for (const entry of entries) {
         dataTransfer.items.add(
           new File([new Uint8Array(entry.bytes)], entry.name, { type: entry.type }),
         );
       }
-      element.dispatchEvent(
-        new DragEvent("drop", { dataTransfer, bubbles: true, cancelable: true }),
-      );
+      return dataTransfer;
     },
     files.map((file) => ({ ...file, bytes: [...file.bytes] })),
+  );
+}
+
+async function dragFilesOver(page: Page, files: DroppedFile[]): Promise<void> {
+  const dataTransfer = await dragTransfer(page, files);
+  await terminalInput(page).dispatchEvent("dragenter", { dataTransfer });
+  await terminalInput(page).dispatchEvent("dragover", { dataTransfer });
+  await dataTransfer.dispose();
+}
+
+async function dropFiles(page: Page, files: DroppedFile[]): Promise<void> {
+  const dataTransfer = await dragTransfer(page, files);
+  await terminalInput(page).dispatchEvent("drop", { dataTransfer });
+  await dataTransfer.dispose();
+}
+
+/** The shared "Drop files here" overlay of the zone around the terminal. */
+function terminalDropOverlay(page: Page) {
+  return page
+    .getByTestId("terminal-surface")
+    .locator("xpath=ancestor::*[.//*[@data-testid='file-drop-backdrop']][1]")
+    .getByTestId("file-drop-backdrop");
+}
+
+/**
+ * Makes the app treat the e2e daemon as the desktop app's own daemon, so dropped
+ * files resolve to paths inside `directory` instead of uploading.
+ */
+async function installLocalDesktopHost(page: Page, directory: string): Promise<void> {
+  const serverId = process.env.E2E_SERVER_ID;
+  if (!serverId) {
+    throw new Error("E2E_SERVER_ID is not set");
+  }
+  await page.addInitScript(
+    (localHost: { serverId: string; directory: string }) => {
+      (window as unknown as { paseoDesktop: unknown }).paseoDesktop = {
+        platform: "linux",
+        invoke: async (command: string) => {
+          if (command === "desktop_daemon_status") {
+            return {
+              serverId: localHost.serverId,
+              status: "running",
+              listen: null,
+              hostname: null,
+              pid: null,
+              home: "",
+              version: null,
+              desktopManaged: true,
+              error: null,
+            };
+          }
+          return null;
+        },
+        getPendingOpenProject: async () => null,
+        events: { on: async () => () => undefined },
+        webUtils: { getPathForFile: (file: File) => `${localHost.directory}/${file.name}` },
+      };
+    },
+    { serverId, directory },
   );
 }
 
@@ -116,7 +181,7 @@ test.describe("Terminal protocol queries", () => {
   test.beforeAll(async () => {
     harness = await TerminalE2EHarness.create({ tempPrefix: "terminal-protocol-query-" });
     await writeFile(path.join(harness.tempRepo.path, "osc11-capture.cjs"), OSC11_CAPTURE_SCRIPT);
-    await writeFile(path.join(harness.tempRepo.path, "image-receiver.cjs"), IMAGE_RECEIVER_SCRIPT);
+    await writeFile(path.join(harness.tempRepo.path, "file-receiver.cjs"), FILE_RECEIVER_SCRIPT);
   });
 
   test.afterAll(async () => {
@@ -144,14 +209,14 @@ test.describe("Terminal protocol queries", () => {
     }
   });
 
-  async function openImageReceiver(page: Page, name: string) {
+  async function openFileReceiver(page: Page, name: string) {
     const terminal = await harness.createTerminal({
       name,
       command: process.execPath,
-      args: ["image-receiver.cjs"],
+      args: ["file-receiver.cjs"],
     });
     await harness.openTerminal(page, { terminalId: terminal.id });
-    await expectTerminalOutput(terminal.id, "IMAGE_RECEIVER_READY");
+    await expectTerminalOutput(terminal.id, "FILE_RECEIVER_READY");
     return terminal;
   }
 
@@ -169,15 +234,15 @@ test.describe("Terminal protocol queries", () => {
     page,
   }) => {
     const secondPage = await page.context().newPage();
-    const first = await openImageReceiver(page, "image-paste-a");
-    const second = await openImageReceiver(secondPage, "image-paste-b");
+    const first = await openFileReceiver(page, "image-paste-a");
+    const second = await openFileReceiver(secondPage, "image-paste-b");
     try {
       await Promise.all([pasteImage(page, pngBytes(1)), pasteImage(secondPage, pngBytes(2))]);
 
-      await expectTerminalOutput(first.id, imageRead(pngBytes(1)));
-      await expectTerminalOutput(second.id, imageRead(pngBytes(2)));
-      expect(await terminalOutput(first.id)).not.toContain(imageRead(pngBytes(2)));
-      expect(await terminalOutput(second.id)).not.toContain(imageRead(pngBytes(1)));
+      await expectTerminalOutput(first.id, fileRead(pngBytes(1), "upload"));
+      await expectTerminalOutput(second.id, fileRead(pngBytes(2), "upload"));
+      expect(await terminalOutput(first.id)).not.toContain(fileRead(pngBytes(2), "upload"));
+      expect(await terminalOutput(second.id)).not.toContain(fileRead(pngBytes(1), "upload"));
     } finally {
       await secondPage.close();
       await harness.killTerminal(first.id);
@@ -185,15 +250,44 @@ test.describe("Terminal protocol queries", () => {
     }
   });
 
-  test("drops an image as an uploaded host file", async ({ page }) => {
-    const terminal = await openImageReceiver(page, "image-drop");
+  test("uploads dropped files of any type when the host is another machine", async ({ page }) => {
+    const terminal = await openFileReceiver(page, "file-drop-remote");
+    const files = [
+      { name: "shot.png", type: "image/png", bytes: pngBytes(3) },
+      { name: "notes.txt", type: "text/plain", bytes: Buffer.from("remote notes") },
+    ];
     try {
-      await dropFiles(page, [
-        { name: "shot.png", type: "image/png", bytes: pngBytes(3) },
-        { name: "notes.txt", type: "text/plain", bytes: Buffer.from("notes") },
-      ]);
+      await dragFilesOver(page, files);
+      await expect(terminalDropOverlay(page)).toHaveCSS("opacity", "1");
+      await expect(terminalDropOverlay(page)).toHaveText("Drop files here");
 
-      await expectTerminalOutput(terminal.id, imageRead(pngBytes(3)));
+      await dropFiles(page, files);
+      await expect(terminalDropOverlay(page)).toHaveCSS("opacity", "0");
+
+      await expectTerminalOutput(terminal.id, fileRead(pngBytes(3), "upload"));
+      await expectTerminalOutput(terminal.id, fileRead(Buffer.from("remote notes"), "upload"));
+    } finally {
+      await harness.killTerminal(terminal.id);
+    }
+  });
+
+  test("pastes dropped files' own paths when the host is this machine", async ({ page }) => {
+    const files = [
+      { name: "local-shot.png", type: "image/png", bytes: pngBytes(9) },
+      { name: "local-notes.txt", type: "text/plain", bytes: Buffer.from("local notes") },
+    ];
+    for (const file of files) {
+      await writeFile(path.join(harness.tempRepo.path, file.name), file.bytes);
+    }
+    await installLocalDesktopHost(page, harness.tempRepo.path);
+    const terminal = await openFileReceiver(page, "file-drop-local");
+    try {
+      await dropFiles(page, files);
+
+      await expectTerminalOutput(terminal.id, fileRead(pngBytes(9), "local"));
+      await expectTerminalOutput(terminal.id, fileRead(Buffer.from("local notes"), "local"));
+      expect(await terminalOutput(terminal.id)).not.toContain(":upload");
+      await expect(page.getByTestId("terminal-file-uploading")).toHaveCount(0);
     } finally {
       await harness.killTerminal(terminal.id);
     }
@@ -201,25 +295,25 @@ test.describe("Terminal protocol queries", () => {
 
   test("lands image pastes in gesture order while typing stays live", async ({ page }) => {
     const upload = await holdFileUploadResponse(page);
-    const terminal = await openImageReceiver(page, "image-order");
+    const terminal = await openFileReceiver(page, "image-order");
     try {
       await pasteImage(page, pngBytes(4));
       await upload.waitUntilHeld();
       await pasteImage(page, pngBytes(5));
-      await expect(page.getByTestId("terminal-image-uploading")).toHaveText("Uploading image…");
+      await expect(page.getByTestId("terminal-file-uploading")).toHaveText("Uploading file…");
 
       await typeLine(page, "describe");
       await expectTerminalOutput(terminal.id, "TYPED:describe");
 
       upload.release();
-      await expectTerminalOutput(terminal.id, imageRead(pngBytes(5)));
+      await expectTerminalOutput(terminal.id, fileRead(pngBytes(5), "upload"));
       const output = await terminalOutput(terminal.id);
-      expect(output.indexOf(imageRead(pngBytes(4)))).toBeGreaterThanOrEqual(0);
-      expect(output.indexOf(imageRead(pngBytes(4)))).toBeLessThan(
-        output.indexOf(imageRead(pngBytes(5))),
+      expect(output.indexOf(fileRead(pngBytes(4), "upload"))).toBeGreaterThanOrEqual(0);
+      expect(output.indexOf(fileRead(pngBytes(4), "upload"))).toBeLessThan(
+        output.indexOf(fileRead(pngBytes(5), "upload")),
       );
-      await expect(page.getByTestId("terminal-image-uploading")).toHaveCount(0);
-      await expect(page.getByTestId("app-toast-message")).toHaveText("Image uploaded");
+      await expect(page.getByTestId("terminal-file-uploading")).toHaveCount(0);
+      await expect(page.getByTestId("app-toast-message")).toHaveText("File uploaded");
     } finally {
       await harness.killTerminal(terminal.id);
     }
@@ -227,19 +321,19 @@ test.describe("Terminal protocol queries", () => {
 
   test("Ctrl+C abandons an image paste that is still uploading", async ({ page }) => {
     const upload = await holdFileUploadResponse(page);
-    const terminal = await openImageReceiver(page, "image-cancel");
+    const terminal = await openFileReceiver(page, "image-cancel");
     try {
       await pasteImage(page, pngBytes(6));
       await upload.waitUntilHeld();
 
       await terminalInput(page).press("Control+c");
       await expectTerminalOutput(terminal.id, "INTERRUPTED");
-      await expect(page.getByTestId("terminal-image-uploading")).toHaveCount(0);
+      await expect(page.getByTestId("terminal-file-uploading")).toHaveCount(0);
       upload.release();
 
       await pasteImage(page, pngBytes(7));
-      await expectTerminalOutput(terminal.id, imageRead(pngBytes(7)));
-      expect(await terminalOutput(terminal.id)).not.toContain(imageRead(pngBytes(6)));
+      await expectTerminalOutput(terminal.id, fileRead(pngBytes(7), "upload"));
+      expect(await terminalOutput(terminal.id)).not.toContain(fileRead(pngBytes(6), "upload"));
     } finally {
       await harness.killTerminal(terminal.id);
     }
@@ -249,19 +343,19 @@ test.describe("Terminal protocol queries", () => {
     page,
   }) => {
     const upload = await holdFileUploadResponse(page);
-    const terminal = await openImageReceiver(page, "image-disconnect");
+    const terminal = await openFileReceiver(page, "image-disconnect");
     try {
       await pasteImage(page, pngBytes(8));
       await upload.waitUntilHeld();
 
       await upload.disconnect();
       await expect(page.getByTestId("app-toast-message")).toHaveText(
-        "Failed to paste image: Host is not connected",
+        "Failed to paste file: Host is not connected",
       );
 
       await typeLine(page, "after");
       await expectTerminalOutput(terminal.id, "TYPED:after");
-      expect(await terminalOutput(terminal.id)).not.toContain(imageRead(pngBytes(8)));
+      expect(await terminalOutput(terminal.id)).not.toContain(fileRead(pngBytes(8), "upload"));
     } finally {
       await harness.killTerminal(terminal.id);
     }
