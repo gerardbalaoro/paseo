@@ -1,13 +1,7 @@
-import { claimTerminalPastePermit } from "./terminal-paste-permit.js";
-import { TerminalImageError } from "@getpaseo/protocol/terminal-image-error";
 import { createTerminalManager } from "./terminal-manager.js";
 import { captureTerminalLines } from "./terminal-capture.js";
 import { TerminalOutputCoalescer } from "./terminal-output-coalescer.js";
-import {
-  TerminalStartError,
-  type TerminalSession,
-  type TerminalStateSnapshotOptions,
-} from "./terminal.js";
+import type { TerminalSession, TerminalStateSnapshotOptions } from "./terminal.js";
 import type {
   TerminalWorkerRequest,
   TerminalWorkerStateResult,
@@ -92,7 +86,6 @@ function reportInFlightTerminalCreateFailure(error: unknown): void {
     requestId: inFlightTerminalCreateRequest.requestId,
     ok: false,
     error: terminalWorkerErrorMessage(error),
-    ...(error instanceof TerminalStartError ? { terminalCreationFailed: true } : {}),
   });
 }
 
@@ -218,7 +211,7 @@ async function handleCreateTerminalRequest(message: TerminalCreateRequest): Prom
   try {
     const { workspaceId } = message.options;
     if (!workspaceId) {
-      throw new TerminalStartError(new Error("workspaceId is required"));
+      throw new Error("workspaceId is required");
     }
     const session = await manager.createTerminal({ ...message.options, workspaceId });
     if (request.errorReported) {
@@ -229,7 +222,6 @@ async function handleCreateTerminalRequest(message: TerminalCreateRequest): Prom
     const initialSnapshot = session.getStateSnapshot();
     sendToParent({
       type: "terminalCreated",
-      requestId: message.requestId,
       terminal: toTerminalInfo(session),
       state: initialSnapshot.state,
     });
@@ -334,15 +326,6 @@ async function handleRequest(message: TerminalWorkerRequest): Promise<void> {
       return;
     }
 
-    case "paste": {
-      claimTerminalPastePermit(message.permit, message.deadline);
-      const session = manager.getTerminal(message.terminalId);
-      if (!session) throw new Error("Terminal closed before image paste completed");
-      await session.paste(message.text);
-      sendToParent({ type: "response", requestId: message.requestId, ok: true });
-      return;
-    }
-
     case "send": {
       const session = manager.getTerminal(message.terminalId);
       session?.send(message.message);
@@ -359,7 +342,6 @@ process.on("message", (message: TerminalWorkerRequest) => {
       requestId: message.requestId,
       ok: false,
       error: terminalWorkerErrorMessage(error),
-      ...(error instanceof TerminalImageError ? { imageErrorCode: error.code } : {}),
     });
   });
 });

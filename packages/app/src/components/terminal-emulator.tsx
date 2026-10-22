@@ -29,10 +29,7 @@ import {
   type TerminalOutputData,
 } from "../terminal/runtime/terminal-emulator-runtime";
 import { encodeTerminalPaste } from "../terminal/runtime/terminal-paste";
-import type {
-  TerminalImagePasteInput,
-  TerminalImagePasteOutcome,
-} from "../terminal/runtime/terminal-paste";
+import { readTerminalImageFile, type TerminalImage } from "../terminal/image-paste";
 import type {
   TerminalLocalFileLinkSource,
   TerminalLocalFileLinkTarget,
@@ -43,9 +40,9 @@ import { openExternalUrl } from "../utils/open-external-url";
 import { focusWithRetries } from "../utils/web-focus";
 import {
   extractTerminalDropPaths,
-  isTerminalImageFile,
   isTerminalDragLeaveOutside,
   isTerminalFileDrag,
+  isTerminalImageFile,
   prepareDroppedPathsForTerminal,
 } from "../terminal/drop/terminal-file-drop";
 import { getDesktopHost } from "@/desktop/host";
@@ -56,8 +53,6 @@ export interface TerminalEmulatorHandle {
   restoreOutput: (data: TerminalOutputData) => void;
   renderSnapshot: (state: TerminalState | null) => void;
   paste: (text: string) => void;
-  inputRaw: (data: string) => void;
-  cancelPaste?: () => void;
   copySelection: (clipboard: TerminalClipboardWriter) => Promise<string>;
   clear: () => void;
   claimSize: () => void;
@@ -152,11 +147,10 @@ interface TerminalEmulatorProps {
     disposition: "main" | "side",
   ) => Promise<void> | void;
   onRendererReadyChange?: (change: TerminalRendererReadyChange) => void;
+  onImagePaste?: (image: Promise<TerminalImage | null>) => void;
   pendingModifiers?: PendingTerminalModifiers;
   focusRequestToken?: number;
   resizeRequestToken?: number;
-  onImagePaste?: (input: TerminalImagePasteInput) => Promise<TerminalImagePasteOutcome>;
-  onPasteFailure?: () => void;
 }
 
 declare global {
@@ -200,11 +194,10 @@ export default function TerminalEmulator({
   onResolveLocalFileLink,
   onOpenLocalFileLink,
   onRendererReadyChange,
+  onImagePaste,
   pendingModifiers = { ctrl: false, shift: false, alt: false },
   focusRequestToken = 0,
   resizeRequestToken = 0,
-  onImagePaste,
-  onPasteFailure,
 }: TerminalEmulatorProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -232,7 +225,6 @@ export default function TerminalEmulator({
     onResolveLocalFileLink,
     onOpenLocalFileLink,
     onImagePaste,
-    onPasteFailure,
   });
   mountCallbacksRef.current = {
     onFindRequest,
@@ -245,7 +237,6 @@ export default function TerminalEmulator({
     onResolveLocalFileLink,
     onOpenLocalFileLink,
     onImagePaste,
-    onPasteFailure,
   };
   const initialSnapshotRef = useRef(initialSnapshot);
   initialSnapshotRef.current = initialSnapshot;
@@ -292,13 +283,6 @@ export default function TerminalEmulator({
           pasteText(text);
         }
       },
-      inputRaw: (...args) => {
-        const data = args[0];
-        if (typeof data === "string") {
-          runtimeRef.current?.inputRaw(data);
-        }
-      },
-      cancelPaste: () => runtimeRef.current?.cancelPaste(),
       copySelection: async () => "",
       clear: () => {
         runtimeRef.current?.clear();
@@ -336,10 +320,6 @@ export default function TerminalEmulator({
       paste: (text: string) => {
         pasteText(text);
       },
-      inputRaw: (data: string) => {
-        runtimeRef.current?.inputRaw(data);
-      },
-      cancelPaste: () => runtimeRef.current?.cancelPaste(),
       copySelection: async () => "",
       clear: () => {
         runtimeRef.current?.clear();
@@ -533,12 +513,12 @@ export default function TerminalEmulator({
         onResolveLocalFileLink,
         onOpenLocalFileLink,
         onImagePaste,
-        onPasteFailure,
         onOpenExternalUrl: openExternalUrl,
       },
     });
   }, [
     onFindRequest,
+    onImagePaste,
     onFindResult,
     onInput,
     onInputModeChange,
@@ -547,8 +527,6 @@ export default function TerminalEmulator({
     onResolveLocalFileLink,
     onResize,
     onTerminalKey,
-    onImagePaste,
-    onPasteFailure,
   ]);
 
   useEffect(() => {
@@ -670,13 +648,15 @@ export default function TerminalEmulator({
       event.stopPropagation();
       clearTerminalDropActive();
 
-      const bridge = getDesktopHost();
-      const images = Array.from(event.dataTransfer?.files ?? []).filter(isTerminalImageFile);
-      const paths = extractTerminalDropPaths(event.dataTransfer, bridge);
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      const paths = extractTerminalDropPaths(event.dataTransfer, getDesktopHost());
       runtimeRef.current?.focus();
-      runtimeRef.current?.dropImages(images);
-      if (paths.length > 0)
-        mountCallbacksRef.current.onInput?.(prepareDroppedPathsForTerminal(paths, bridge));
+      for (const image of files.filter(isTerminalImageFile)) {
+        mountCallbacksRef.current.onImagePaste?.(readTerminalImageFile(image));
+      }
+      if (paths.length > 0) {
+        mountCallbacksRef.current.onInput?.(prepareDroppedPathsForTerminal(paths));
+      }
     };
 
     root.addEventListener("dragenter", handleDragEnter, { capture: true });

@@ -22,24 +22,9 @@ function getFilePath(file: File, bridge: DesktopHostBridge | null): string | nul
   return getLegacyFilePath(file);
 }
 
-/** Keep images out of the path-only drop flow, including unsupported image formats. */
-export function isTerminalImageFile(file: Pick<File, "name" | "type">): boolean {
-  return Boolean(
-    file.type?.startsWith("image/") ||
-    /\.(?:png|jpe?g|gif|webp|avif|heic|heif|bmp|tiff?|svg|ico)$/i.test(file.name),
-  );
-}
-
-export function terminalDropImageMimeType(
-  file: Pick<File, "name" | "type">,
-): "image/png" | "image/jpeg" | null {
-  if (file.type === "image/png" || file.type === "image/jpeg") return file.type;
-  // Some desktop drag sources omit the MIME type; the daemon still validates bytes.
-  if (!file.type) {
-    if (/\.png$/i.test(file.name)) return "image/png";
-    if (/\.jpe?g$/i.test(file.name)) return "image/jpeg";
-  }
-  return null;
+/** Images are uploaded to the host instead of pasting their client-side path. */
+export function isTerminalImageFile(file: Pick<File, "type">): boolean {
+  return file.type.startsWith("image/");
 }
 
 export function isTerminalFileDrag(dataTransfer: DataTransfer | null): boolean {
@@ -78,7 +63,9 @@ export function extractTerminalDropPaths(
 
   const paths: string[] = [];
   for (const file of Array.from(dataTransfer.files)) {
-    if (isTerminalImageFile(file)) continue;
+    if (isTerminalImageFile(file)) {
+      continue;
+    }
     const path = getFilePath(file, bridge);
     if (path) {
       paths.push(path);
@@ -111,19 +98,16 @@ function escapeWindowsPath(path: string): string {
   return `"${path}"`;
 }
 
-export function prepareDroppedPathForTerminal(
-  path: string,
-  bridge: DesktopHostBridge | null,
-): string {
-  if (bridge?.platform === "win32") {
+const WINDOWS_PATH = /^(?:[A-Za-z]:[\\/]|\\\\)/;
+
+/** Quotes a path for the shell of the machine it belongs to, identified by the path's shape. */
+export function prepareTerminalPath(path: string): string {
+  if (WINDOWS_PATH.test(path)) {
     return escapeWindowsPath(path);
   }
   return escapeNonWindowsPath(path);
 }
 
-export function prepareDroppedPathsForTerminal(
-  paths: readonly string[],
-  bridge: DesktopHostBridge | null,
-): string {
-  return paths.map((path) => prepareDroppedPathForTerminal(path, bridge)).join(" ");
+export function prepareDroppedPathsForTerminal(paths: readonly string[]): string {
+  return paths.map(prepareTerminalPath).join(" ");
 }

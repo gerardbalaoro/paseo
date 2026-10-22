@@ -621,15 +621,7 @@ export const ptBR: TranslationResources = {
       updateHost: "Atualize o host para usar o renderizador de terminal nativo.",
       unableToSubscribe: "Não foi possível assinar o terminal",
       pasteImageFailed: "Falha ao colar a imagem",
-      pasteImageDiskFull: "O disco do host está cheio. Libere espaço e cole novamente.",
-      pasteImageQuota:
-        "O limite de imagens do terminal foi atingido. Feche terminais sem uso ou aguarde as imagens retidas expirarem.",
-      pasteImageClosed: "Este terminal foi fechado. Abra um terminal e cole novamente.",
-      pasteImageUnsupported: "Este programa não aceita colar arquivos de imagem.",
-      pasteImageInvalid: "Use uma imagem PNG ou JPEG menor que 10 MiB.",
       uploadingImage: "Enviando imagem…",
-      pasteImageUnknown:
-        "Não foi possível confirmar a inserção da imagem. Verifique o terminal antes de tentar novamente.",
     },
     sheet: {
       openAsTab: "Abrir como aba",

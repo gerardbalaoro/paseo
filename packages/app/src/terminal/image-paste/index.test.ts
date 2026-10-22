@@ -1,0 +1,172 @@
+import { describe, expect, it } from "vitest";
+import { FILE_UPLOAD_MAX_BYTES } from "@/attachments/upload-limit";
+import {
+  TerminalImagePasteQueue,
+  type TerminalImage,
+  type TerminalImagePasteTarget,
+} from "./index";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+function image(fileName: string, bytes: number[] = [1, 2, 3]): TerminalImage {
+  return { fileName, mimeType: "image/png", bytes: new Uint8Array(bytes) };
+}
+
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+class FakeHost implements TerminalImagePasteTarget {
+  readonly uploads: TerminalImage[] = [];
+  readonly pasted: string[] = [];
+  private readonly results = new Map<string, Promise<string>>();
+
+  holdUpload(fileName: string): ReturnType<typeof deferred<string>> {
+    const result = deferred<string>();
+    this.results.set(fileName, result.promise);
+    return result;
+  }
+
+  async upload(input: TerminalImage): Promise<string> {
+    this.uploads.push(input);
+    return this.results.get(input.fileName) ?? `/host/uploads/${input.fileName}`;
+  }
+
+  paste(text: string): void {
+    this.pasted.push(text);
+  }
+}
+
+function createQueue() {
+  const events = { failures: 0, uploading: [] as boolean[] };
+  const queue = new TerminalImagePasteQueue({
+    onFailure: () => {
+      events.failures += 1;
+    },
+    onUploadingChange: (uploading) => {
+      events.uploading.push(uploading);
+    },
+  });
+  return { queue, events, host: new FakeHost() };
+}
+
+describe("terminal image paste queue", () => {
+  it("pastes each uploaded host path in gesture order", async () => {
+    const { queue, host, events } = createQueue();
+    const firstRead = deferred<TerminalImage | null>();
+    const firstUpload = host.holdUpload("a.png");
+
+    queue.add(firstRead.promise, host);
+    queue.add(Promise.resolve(image("b.png")), host);
+    await settle();
+    expect(host.uploads).toEqual([]);
+
+    firstRead.resolve(image("a.png"));
+    await settle();
+    expect(host.uploads.map((upload) => upload.fileName)).toEqual(["a.png"]);
+
+    firstUpload.resolve("/host/uploads/a.png");
+    await settle();
+    expect(host.pasted).toEqual(["'/host/uploads/a.png'", "'/host/uploads/b.png'"]);
+    expect(events).toEqual({ failures: 0, uploading: [true, false, true, false] });
+  });
+
+  it("quotes Windows host paths for the host shell", async () => {
+    const { queue, host } = createQueue();
+    host.holdUpload("shot.png").resolve("C:\\Users\\Jo Doe\\.paseo\\uploads\\upload_1\\shot.png");
+
+    queue.add(Promise.resolve(image("shot.png")), host);
+    await settle();
+
+    expect(host.pasted).toEqual(['"C:\\Users\\Jo Doe\\.paseo\\uploads\\upload_1\\shot.png"']);
+  });
+
+  it("uploads under a file name that needs no shell quoting", async () => {
+    const { queue, host } = createQueue();
+
+    queue.add(Promise.resolve(image("Screen Shot #1 (it's $HOME).png")), host);
+    await settle();
+
+    expect(host.uploads.map((upload) => upload.fileName)).toEqual([
+      "Screen_Shot__1__it_s__HOME_.png",
+    ]);
+  });
+
+  it("does nothing for a gesture that carried no image", async () => {
+    const { queue, host, events } = createQueue();
+
+    queue.add(Promise.resolve(null), host);
+    await settle();
+
+    expect(host.uploads).toEqual([]);
+    expect(host.pasted).toEqual([]);
+    expect(events).toEqual({ failures: 0, uploading: [] });
+  });
+
+  it("reports a failed upload and keeps pasting later images", async () => {
+    const { queue, host, events } = createQueue();
+    host.holdUpload("a.png").reject(new Error("disk full"));
+
+    queue.add(Promise.resolve(image("a.png")), host);
+    queue.add(Promise.resolve(image("b.png")), host);
+    await settle();
+
+    expect(events.failures).toBe(1);
+    expect(host.pasted).toEqual(["'/host/uploads/b.png'"]);
+  });
+
+  it("reports unreadable and oversized images without uploading them", async () => {
+    const { queue, host, events } = createQueue();
+    const oversized = {
+      ...image("big.png"),
+      bytes: new Uint8Array(FILE_UPLOAD_MAX_BYTES + 1),
+    };
+
+    queue.add(Promise.reject(new Error("unreadable")), host);
+    queue.add(Promise.resolve(oversized), host);
+    await settle();
+
+    expect(events.failures).toBe(2);
+    expect(host.uploads).toEqual([]);
+  });
+
+  it("never pastes the path of an upload cancelled mid-flight", async () => {
+    const { queue, host, events } = createQueue();
+    const upload = host.holdUpload("a.png");
+
+    queue.add(Promise.resolve(image("a.png")), host);
+    queue.add(Promise.resolve(image("b.png")), host);
+    await settle();
+    expect(queue.cancel()).toBe(true);
+    expect(events.uploading).toEqual([true, false]);
+
+    upload.resolve("/host/uploads/a.png");
+    await settle();
+    expect(host.pasted).toEqual([]);
+    expect(host.uploads.map((entry) => entry.fileName)).toEqual(["a.png"]);
+    expect(events.failures).toBe(0);
+  });
+
+  it("does not hold new pastes behind a cancelled upload that never settles", async () => {
+    const { queue, host, events } = createQueue();
+    host.holdUpload("stuck.png");
+
+    queue.add(Promise.resolve(image("stuck.png")), host);
+    await settle();
+    queue.cancel();
+    queue.add(Promise.resolve(image("next.png")), host);
+    await settle();
+
+    expect(host.pasted).toEqual(["'/host/uploads/next.png'"]);
+    expect(events.uploading).toEqual([true, false, true, false]);
+    expect(queue.cancel()).toBe(false);
+  });
+});

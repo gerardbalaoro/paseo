@@ -1,4 +1,3 @@
-import { TerminalPasteQueue } from "@getpaseo/protocol/terminal-paste-queue";
 import { TerminalFind, type TerminalPaneFindHandle } from "@/terminal/find";
 import type { TerminalFindResult } from "@/terminal/runtime/terminal-emulator-runtime";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
@@ -44,13 +43,13 @@ import {
   shouldShowTerminalPasteAction,
   type TerminalVirtualKeyboardControl,
 } from "@/terminal/runtime/terminal-virtual-keyboard";
-import { useToast } from "@/contexts/toast-context";
+import { encodeTerminalPaste, pasteTerminalClipboard } from "@/terminal/runtime/terminal-paste";
 import {
-  encodeTerminalPaste,
-  TERMINAL_IMAGE_PASTE_KEYSTROKE,
-  type TerminalImagePasteInput,
-  type TerminalImagePasteOutcome,
-} from "@/terminal/runtime/terminal-paste";
+  TerminalImagePasteQueue,
+  terminalImageFromBase64,
+  type TerminalImage,
+} from "@/terminal/image-paste";
+import { useToast } from "@/contexts/toast-context";
 import { getWorkspaceTerminalSession } from "@/terminal/runtime/workspace-terminal-session";
 import {
   EMPTY_FOCUS_CLAIM_STATE,
@@ -128,6 +127,18 @@ type PendingTerminalInput =
       type: "key";
       input: TerminalKeyInput;
     };
+
+async function readNativeClipboardImage(): Promise<TerminalImage | null> {
+  const image = await Clipboard.getImageAsync({ format: "png" });
+  if (!image) {
+    return null;
+  }
+  return terminalImageFromBase64({
+    fileName: "clipboard.png",
+    mimeType: "image/png",
+    data: image.data.slice(image.data.indexOf(",") + 1),
+  });
+}
 
 function terminalScopeKey(input: { serverId: string; cwd: string }): string {
   return `${input.serverId}:${input.cwd}`;
@@ -269,7 +280,6 @@ export function TerminalPane({
 
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
-  const toast = useToast();
   const isTerminalPresented = retainedPanelActive && isWorkspaceFocused;
   const supportsTerminalRestoreModes = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.["terminal-restore-modes"] === true,
@@ -281,30 +291,10 @@ export function TerminalPane({
   const supportsTerminalSizeOwnership = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.["terminal-size-ownership"] === true,
   );
-  const supportsTerminalImagePaste = useSessionStore(
-    (state) =>
-      state.sessions[serverId]?.serverInfo?.features?.terminalImagePasteSequencing === true,
-  );
   const setFocusedTerminalId = useSessionStore((state) => state.setFocusedTerminalId);
 
   const scopeKey = useMemo(() => terminalScopeKey({ serverId, cwd }), [serverId, cwd]);
   const terminalStreamKey = useMemo(() => `${scopeKey}:${terminalId}`, [scopeKey, terminalId]);
-  const clipboardReadGeneration = useRef(0);
-  const [pasteQueue] = useState(() => new TerminalPasteQueue());
-  useEffect(
-    () => () => {
-      clipboardReadGeneration.current += 1;
-      pasteQueue.dispose();
-    },
-    [pasteQueue, terminalStreamKey],
-  );
-  useEffect(() => {
-    if (!isConnected) {
-      clipboardReadGeneration.current += 1;
-      pasteQueue.dispose();
-      emulatorRef.current?.cancelPaste?.();
-    }
-  }, [isConnected, pasteQueue]);
   // Keep the latest measured size for whichever client currently owns the pane,
   // but only dedupe resizes that this specific client has already pushed.
   const measuredTerminalSizeRef = useRef<{ rows: number; cols: number } | null>(null);
@@ -321,9 +311,27 @@ export function TerminalPane({
   const [hasSelection, setHasSelection] = useState(false);
   const [hasClipboardText, setHasClipboardText] = useState(false);
   const [hasClipboardImage, setHasClipboardImage] = useState(false);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [isKeyboardToggleVisible, setIsKeyboardToggleVisible] = useState(false);
   const [focusRequestToken, setFocusRequestToken] = useState(0);
   const [resizeRequestToken, setResizeRequestToken] = useState(0);
+  const toast = useToast();
+  const reportImagePasteFailure = useStableEvent(() => {
+    toast.error(t("workspace.terminal.pasteImageFailed"));
+  });
+  const [imagePastes] = useState(
+    () =>
+      new TerminalImagePasteQueue({
+        onFailure: reportImagePasteFailure,
+        onUploadingChange: setIsUploadingImage,
+      }),
+  );
+  useEffect(() => () => void imagePastes.cancel(), [imagePastes, terminalStreamKey]);
+  useEffect(() => {
+    if (!isConnected && imagePastes.cancel()) {
+      reportImagePasteFailure();
+    }
+  }, [imagePastes, isConnected, reportImagePasteFailure]);
   useBlockMobilePanelOpenGestures(isMobile && isWorkspaceFocused && isPaneFocused && hasSelection);
   const emulatorRef = useRef<TerminalEmulatorHandle>(null);
   const findRef = useRef<TerminalPaneFindHandle>(null);
@@ -347,10 +355,10 @@ export function TerminalPane({
     inputModeRef.current = DEFAULT_TERMINAL_INPUT_MODE_STATE;
     setHasSelection(false);
   }, [terminalId]);
+
   const refreshClipboardAvailability = useCallback(async () => {
     if (!showVirtualKeyBar) {
       setHasClipboardText(false);
-      setHasClipboardImage(false);
       return;
     }
     try {
@@ -667,8 +675,6 @@ export function TerminalPane({
 
   const dispatchTerminalInputEntry = useCallback(
     (entry: PendingTerminalInput): boolean => {
-      // Never replay input released by a cancelled paste on a new connection.
-      if (!isConnected) return true;
       if (!client) {
         return false;
       }
@@ -679,9 +685,10 @@ export function TerminalPane({
       }
 
       if (entry.type === "data") {
-        pasteQueue.input(entry.data, (data) =>
-          client.sendTerminalInput(currentTerminalId, { type: "input", data }),
-        );
+        client.sendTerminalInput(currentTerminalId, {
+          type: "input",
+          data: entry.data,
+        });
         return true;
       }
 
@@ -689,13 +696,14 @@ export function TerminalPane({
         keyInput: entry.input,
         inputMode: inputModeRef.current,
         sendData: (data) =>
-          pasteQueue.input(data, (value) =>
-            client.sendTerminalInput(currentTerminalId, { type: "input", data: value }),
-          ),
+          client.sendTerminalInput(currentTerminalId, {
+            type: "input",
+            data,
+          }),
       });
       return true;
     },
-    [client, isConnected, pasteQueue],
+    [client],
   );
 
   const flushPendingTerminalInput = useCallback(() => {
@@ -739,6 +747,9 @@ export function TerminalPane({
       alt: boolean;
       meta?: boolean;
     }): boolean => {
+      if (input.ctrl && input.key.toLowerCase() === "c") {
+        imagePastes.cancel();
+      }
       if (!client || !terminalIdRef.current) {
         enqueuePendingTerminalInput({
           type: "key",
@@ -774,13 +785,17 @@ export function TerminalPane({
       }
       return true;
     },
-    [client, dispatchTerminalInputEntry, enqueuePendingTerminalInput],
+    [client, dispatchTerminalInputEntry, enqueuePendingTerminalInput, imagePastes],
   );
 
   const handleTerminalData = useCallback(
     async (data: string) => {
       if (data.length === 0) {
         return;
+      }
+      // Ctrl+C abandons image pastes that have not landed yet.
+      if (data.includes("\x03")) {
+        imagePastes.cancel();
       }
 
       if (hasPendingTerminalModifiers(modifiers)) {
@@ -827,11 +842,39 @@ export function TerminalPane({
       clearPendingModifiers,
       client,
       dispatchTerminalInputEntry,
+      imagePastes,
       modifiers,
       sendTerminalKey,
       enqueuePendingTerminalInput,
     ],
   );
+
+  const handleImagePaste = useStableEvent((image: Promise<TerminalImage | null>) => {
+    imagePastes.add(image, {
+      upload: async (file) => {
+        if (!client || !isConnected) {
+          throw new Error("Host is not connected");
+        }
+        const response = await client.uploadFile(file);
+        if (!response.file) {
+          throw new Error(response.error ?? "Upload failed");
+        }
+        return response.file.path;
+      },
+      paste: (text) => {
+        const entry: PendingTerminalInput = {
+          type: "data",
+          data: encodeTerminalPaste({
+            text,
+            bracketedPaste: inputModeRef.current.bracketedPaste ?? false,
+          }),
+        };
+        if (!dispatchTerminalInputEntry(entry)) {
+          enqueuePendingTerminalInput(entry);
+        }
+      },
+    });
+  });
 
   const sendTerminalResize = useStableEvent((input: TerminalResizeRequest) => {
     const nextSize = { rows: input.rows, cols: input.cols };
@@ -907,142 +950,18 @@ export function TerminalPane({
   const handlePendingModifiersConsumed = useCallback(() => {
     clearPendingModifiers();
   }, [clearPendingModifiers]);
-  const [imageUploads, setImageUploads] = useState(0);
-  const pasteFailureReasonRef = useRef<string | null>(null);
-  const uploadTerminalImage = useCallback(
-    async (
-      input: TerminalImagePasteInput,
-      signal?: AbortSignal,
-    ): Promise<TerminalImagePasteOutcome> => {
-      if (!client || !isConnected) {
-        pasteFailureReasonRef.current = t("workspace.terminal.hostDisconnected");
-        return "error";
-      }
-      // COMPAT(terminalImagePasteSequencing): added in v0.11, remove after 2027-04-15.
-      // Older hosts retain native local clipboard keystrokes; never invoke their
-      // shared clipboard writer for transferred bytes.
-      if (!supportsTerminalImagePaste) {
-        return "unsupported";
-      }
-      setImageUploads((count) => count + 1);
-      try {
-        const result = await client.writeTerminalClipboardImage({
-          terminalId,
-          signal,
-          data: input.data,
-          mimeType: input.mimeType,
-        });
-        if (result.success && result.injected) {
-          return "injected";
-        }
-        const keys = {
-          disk_full: "workspace.terminal.pasteImageDiskFull",
-          quota_exceeded: "workspace.terminal.pasteImageQuota",
-          terminal_closed: "workspace.terminal.pasteImageClosed",
-          unsupported_mode: "workspace.terminal.pasteImageUnsupported",
-          invalid_image: "workspace.terminal.pasteImageInvalid",
-          upload_failed: "workspace.terminal.pasteImageFailed",
-        } as const;
-        const errorKey = result.errorCode
-          ? keys[result.errorCode]
-          : "workspace.terminal.pasteImageFailed";
-        pasteFailureReasonRef.current = t(
-          result.outcomeUnknown ? "workspace.terminal.pasteImageUnknown" : errorKey,
-        );
-        return "error";
-      } catch {
-        pasteFailureReasonRef.current = t("workspace.terminal.pasteImageUnknown");
-        return "error";
-      } finally {
-        setImageUploads((count) => count - 1);
-      }
-    },
-    [client, isConnected, terminalId, supportsTerminalImagePaste, t],
-  );
-
-  const handlePasteFailure = useCallback(() => {
-    const reason = pasteFailureReasonRef.current ?? t("workspace.terminal.pasteImageFailed");
-    pasteFailureReasonRef.current = null;
-    toast.show(reason, {
-      variant: "error",
-      durationMs: null,
-    });
-  }, [t, toast]);
-
-  const handleTerminalImagePaste = useCallback(
-    async (input: TerminalImagePasteInput): Promise<TerminalImagePasteOutcome> => {
-      let outcome: TerminalImagePasteOutcome = "error";
-      const ok = await pasteQueue.paste(async (signal) => {
-        if (signal.aborted) return false;
-        outcome = await uploadTerminalImage(input, signal);
-        return outcome !== "error";
-      });
-      return ok ? outcome : "error";
-    },
-    [pasteQueue, uploadTerminalImage],
-  );
 
   const handleTerminalPaste = useCallback(() => {
     requestTerminalReflow();
-    const generation = clipboardReadGeneration.current;
-    const clipboardText = Clipboard.getStringAsync()
-      .catch(() => null)
-      .then((text) => {
-        if (
-          text &&
-          client &&
-          isConnected &&
-          terminalIdRef.current === terminalId &&
-          generation === clipboardReadGeneration.current
-        )
-          client.sendTerminalInput(terminalId, {
-            type: "input",
-            data: encodeTerminalPaste({
-              text,
-              bracketedPaste: inputModeRef.current.bracketedPaste ?? false,
-            }),
-          });
-        return text;
-      });
-    const clipboardImage = Clipboard.getImageAsync({ format: "png" }).catch(() => null);
-    void pasteQueue
-      .paste(async (signal) => {
-        if (!client || !isConnected) return false;
-        const text = await clipboardText;
-        if (signal.aborted || text === null) return false;
-        if (text) return true;
-        const image = await clipboardImage;
-        if (signal.aborted || !image?.data) return false;
-        const base64Start = image.data.indexOf(",");
-        const outcome = await uploadTerminalImage(
-          {
-            data: base64Start >= 0 ? image.data.slice(base64Start + 1) : image.data,
-            mimeType: "image/png",
-          },
-          signal,
-        );
-        if (signal.aborted && outcome !== "injected") return false;
-        if (outcome === "written" || outcome === "unsupported")
-          client?.sendTerminalInput(terminalId, {
-            type: "input",
-            data: TERMINAL_IMAGE_PASTE_KEYSTROKE,
-          });
-        return outcome !== "error";
-      })
-      .then((ok) => {
-        if (!ok) handlePasteFailure();
-        return refreshClipboardAvailability();
-      });
-  }, [
-    client,
-    terminalId,
-    pasteQueue,
-    isConnected,
-    uploadTerminalImage,
-    refreshClipboardAvailability,
-    requestTerminalReflow,
-    handlePasteFailure,
-  ]);
+    const image = pasteTerminalClipboard({
+      clipboard: { readText: () => Clipboard.getStringAsync() },
+      terminal: { paste: (text) => emulatorRef.current?.paste(text) },
+    })
+      .catch(() => false)
+      .then((pastedText) => (pastedText ? null : readNativeClipboardImage()));
+    handleImagePaste(image);
+    void image.catch(() => null).then(() => refreshClipboardAvailability());
+  }, [handleImagePaste, requestTerminalReflow, refreshClipboardAvailability]);
 
   const handleTerminalCopy = useCallback(() => {
     void emulatorRef.current
@@ -1252,8 +1171,7 @@ export function TerminalPane({
             onFocus={handleTerminalFocus}
             onResize={handleTerminalResize}
             onTerminalKey={handleTerminalKey}
-            onImagePaste={handleTerminalImagePaste}
-            onPasteFailure={handlePasteFailure}
+            onImagePaste={handleImagePaste}
             onInputModeChange={handleInputModeChange}
             onSelectionChange={handleSelectionChange}
             onResolveLocalFileLink={handleResolveLocalFileLink}
@@ -1275,7 +1193,7 @@ export function TerminalPane({
           focusTerminal={requestTerminalFocus}
         />
 
-        {imageUploads > 0 ? (
+        {isUploadingImage ? (
           <View
             pointerEvents="none"
             style={styles.imageUploadStatus}
@@ -1284,6 +1202,7 @@ export function TerminalPane({
             <Text style={styles.imageUploadText}>{t("workspace.terminal.uploadingImage")}</Text>
           </View>
         ) : null}
+
         {showLoadingOverlay ? (
           <View style={styles.attachOverlay} pointerEvents="none" testID="terminal-attach-loading">
             <LoadingSpinner size="small" color={theme.colors.foregroundMuted} />
@@ -1333,15 +1252,6 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 0,
     backgroundColor: theme.colors.surface0,
   },
-  imageUploadStatus: {
-    position: "absolute",
-    top: theme.spacing[2],
-    right: theme.spacing[2],
-    padding: theme.spacing[1],
-    borderRadius: theme.borderRadius.sm,
-    backgroundColor: theme.colors.surface1,
-  },
-  imageUploadText: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
   outputContainer: {
     flex: 1,
     minHeight: 0,
@@ -1351,6 +1261,18 @@ const styles = StyleSheet.create((theme) => ({
   terminalGestureContainer: {
     flex: 1,
     minHeight: 0,
+  },
+  imageUploadStatus: {
+    position: "absolute",
+    top: theme.spacing[2],
+    right: theme.spacing[2],
+    padding: theme.spacing[1],
+    borderRadius: theme.borderRadius.sm,
+    backgroundColor: theme.colors.surface1,
+  },
+  imageUploadText: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
   },
   attachOverlay: {
     ...StyleSheet.absoluteFill,

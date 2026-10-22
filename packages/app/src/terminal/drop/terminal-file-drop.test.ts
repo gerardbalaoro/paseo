@@ -4,8 +4,8 @@ import {
   extractTerminalDropPaths,
   isTerminalDragLeaveOutside,
   isTerminalFileDrag,
-  prepareDroppedPathForTerminal,
   prepareDroppedPathsForTerminal,
+  prepareTerminalPath,
 } from "./terminal-file-drop";
 
 function dataTransfer(input: { types?: string[]; files?: File[] }): DataTransfer {
@@ -15,8 +15,8 @@ function dataTransfer(input: { types?: string[]; files?: File[] }): DataTransfer
   } as unknown as DataTransfer;
 }
 
-function fakeFile(input: { name: string; legacyPath?: string }): File {
-  const file = { name: input.name } as unknown as File;
+function fakeFile(input: { name: string; type?: string; legacyPath?: string }): File {
+  const file = { name: input.name, type: input.type ?? "" } as unknown as File;
   if (input.legacyPath !== undefined) {
     Object.defineProperty(file, "path", {
       configurable: true,
@@ -54,18 +54,18 @@ describe("terminal file drop", () => {
   });
 
   it("extracts paths through Electron webUtils", () => {
-    const file = fakeFile({ name: "notes.txt" });
-    const getPathForFile = vi.fn(() => "/Users/me/Desktop/notes.txt");
+    const file = fakeFile({ name: "photo.png" });
+    const getPathForFile = vi.fn(() => "/Users/me/Desktop/photo.png");
     const bridge: DesktopHostBridge = { webUtils: { getPathForFile } };
 
     expect(
       extractTerminalDropPaths(dataTransfer({ types: ["Files"], files: [file] }), bridge),
-    ).toEqual(["/Users/me/Desktop/notes.txt"]);
+    ).toEqual(["/Users/me/Desktop/photo.png"]);
     expect(getPathForFile).toHaveBeenCalledWith(file);
   });
 
   it("falls back to legacy Electron file paths", () => {
-    const file = fakeFile({ name: "notes.txt", legacyPath: "/tmp/legacy-notes.txt" });
+    const file = fakeFile({ name: "photo.png", legacyPath: "/tmp/legacy-photo.png" });
     const bridge: DesktopHostBridge = {
       webUtils: {
         getPathForFile: vi.fn(() => {
@@ -76,56 +76,50 @@ describe("terminal file drop", () => {
 
     expect(
       extractTerminalDropPaths(dataTransfer({ types: ["Files"], files: [file] }), bridge),
-    ).toEqual(["/tmp/legacy-notes.txt"]);
+    ).toEqual(["/tmp/legacy-photo.png"]);
   });
 
   it("drops browser files that have no filesystem path", () => {
-    const file = fakeFile({ name: "notes.txt" });
+    const file = fakeFile({ name: "photo.png" });
 
     expect(
       extractTerminalDropPaths(dataTransfer({ types: ["Files"], files: [file] }), null),
     ).toEqual([]);
   });
 
-  it("prepares POSIX paths with conservative escaping", () => {
-    const bridge: DesktopHostBridge = { platform: "darwin" };
+  it("leaves image files out of the dropped paths", () => {
+    const bridge: DesktopHostBridge = {
+      webUtils: { getPathForFile: (file) => `/client/${file.name}` },
+    };
+    const files = [
+      fakeFile({ name: "shot.png", type: "image/png" }),
+      fakeFile({ name: "notes.txt", type: "text/plain" }),
+    ];
 
-    expect(prepareDroppedPathForTerminal("/tmp/my image.png", bridge)).toBe("'/tmp/my image.png'");
-    expect(prepareDroppedPathForTerminal("/tmp/a$(touch bad).png", bridge)).toBe(
-      "'/tmp/a(touch bad).png'",
-    );
-    expect(prepareDroppedPathForTerminal("/tmp/it's.png", bridge)).toBe("'/tmp/it\\'s.png'");
+    expect(extractTerminalDropPaths(dataTransfer({ types: ["Files"], files }), bridge)).toEqual([
+      "/client/notes.txt",
+    ]);
+  });
+
+  it("prepares POSIX paths with conservative escaping", () => {
+    expect(prepareTerminalPath("/tmp/my image.png")).toBe("'/tmp/my image.png'");
+    expect(prepareTerminalPath("/tmp/a$(touch bad).png")).toBe("'/tmp/a(touch bad).png'");
+    expect(prepareTerminalPath("/tmp/it's.png")).toBe("'/tmp/it\\'s.png'");
   });
 
   it("prepares Windows paths with space quoting", () => {
-    const bridge: DesktopHostBridge = { platform: "win32" };
-
-    expect(prepareDroppedPathForTerminal("C:\\Users\\me\\photo.png", bridge)).toBe(
-      "C:\\Users\\me\\photo.png",
-    );
-    expect(prepareDroppedPathForTerminal("C:\\Users\\me\\photo one.png", bridge)).toBe(
+    expect(prepareTerminalPath("C:\\Users\\me\\photo.png")).toBe("C:\\Users\\me\\photo.png");
+    expect(prepareTerminalPath("C:\\Users\\me\\photo one.png")).toBe(
       '"C:\\Users\\me\\photo one.png"',
+    );
+    expect(prepareTerminalPath("\\\\server\\share\\photo one.png")).toBe(
+      '"\\\\server\\share\\photo one.png"',
     );
   });
 
   it("joins multiple dropped paths for one terminal input", () => {
-    const bridge: DesktopHostBridge = { platform: "darwin" };
-
-    expect(prepareDroppedPathsForTerminal(["/tmp/a.png", "/tmp/b c.png"], bridge)).toBe(
+    expect(prepareDroppedPathsForTerminal(["/tmp/a.png", "/tmp/b c.png"])).toBe(
       "'/tmp/a.png' '/tmp/b c.png'",
     );
   });
-});
-
-it("never inserts client-local image paths from mixed drops", () => {
-  const files = [
-    new File(["png"], "photo.PNG", { type: "image/png" }),
-    new File(["jpeg"], "photo.jpeg"),
-    new File(["gif"], "animation.gif", { type: "image/gif" }),
-    new File(["text"], "notes.txt", { type: "text/plain" }),
-  ];
-  const bridge: DesktopHostBridge = {
-    webUtils: { getPathForFile: (file) => `/client/${file.name}` },
-  };
-  expect(extractTerminalDropPaths(dataTransfer({ files }), bridge)).toEqual(["/client/notes.txt"]);
 });

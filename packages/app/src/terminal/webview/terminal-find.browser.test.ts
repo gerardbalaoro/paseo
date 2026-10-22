@@ -7,7 +7,7 @@ interface Message {
   streamKey?: string;
   result?: { resultCount: number; resultIndex: number };
   data?: string;
-  requestId?: number;
+  fileName?: string;
   mimeType?: string;
 }
 interface TerminalFrameWindow extends Window {
@@ -79,47 +79,26 @@ test("the generated WebView searches its mounted stream and keeps Find commands 
   send({ type: "unmount" });
 });
 
-test.each([
-  { outcome: "injected", expected: ["after-paste"] },
-  { outcome: "error", expected: ["after-paste"] },
-  { outcome: "unsupported", expected: ["after-paste", "\x16"] },
-] as const)(
-  "the generated WebView transfers image bytes and handles $outcome without duplicate input",
-  async ({ outcome, expected }) => {
-    const { win, send, messages } = await mountWebView();
-    send({ type: "rawInput", streamKey: "stale", data: "wrong" });
-    send({ type: "rawInput", data: "\x16" });
-    expect(
-      messages.filter((message) => message.type === "input").map((message) => message.data),
-    ).toEqual(["\x16"]);
-    messages.length = 0;
-    const data = new DataTransfer();
-    const bytes = new Uint8Array([137, 80, 78, 71]);
-    data.items.add(new File([bytes], "image.png", { type: "image/png" }));
-    win.document
-      .querySelector(".xterm-helper-textarea")!
-      .dispatchEvent(
-        new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }),
-      );
-    await expect
-      .poll(() => messages.find((message) => message.type === "imagePaste"))
-      .toMatchObject({
-        streamKey: "owned",
-        data: "iVBORw==",
-        mimeType: "image/png",
-      });
-    const request = messages.find((message) => message.type === "imagePaste")!;
-    send({ type: "rawInput", data: "after-paste" });
-    expect(
-      messages.filter((message) => message.type === "input").map((message) => message.data),
-    ).toEqual(["after-paste"]);
-    send({ type: "imagePasteResult", requestId: request.requestId, outcome });
-    await new Promise<void>((resolve) => win.requestAnimationFrame(() => resolve()));
-    await expect
-      .poll(() =>
-        messages.filter((message) => message.type === "input").map((message) => message.data),
-      )
-      .toEqual(expected);
-    send({ type: "unmount" });
-  },
-);
+test("the generated WebView forwards image-only pastes to native as image bytes", async () => {
+  const { win, send, messages } = await mountWebView();
+  const clipboardData = new DataTransfer();
+  clipboardData.items.add(
+    new File([new Uint8Array([137, 80, 78, 71])], "image.png", { type: "image/png" }),
+  );
+
+  win.document
+    .querySelector(".xterm-helper-textarea")!
+    .dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
+
+  await expect
+    .poll(() => messages.find((m) => m.type === "imagePaste"))
+    .toEqual({
+      type: "imagePaste",
+      streamKey: "owned",
+      fileName: "image.png",
+      mimeType: "image/png",
+      data: "iVBORw==",
+    });
+  expect(messages.filter((m) => m.type === "input")).toEqual([]);
+  send({ type: "unmount" });
+});

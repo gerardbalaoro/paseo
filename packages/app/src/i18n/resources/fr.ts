@@ -622,15 +622,7 @@ export const fr: TranslationResources = {
       updateHost: "Mettez à jour l’hôte pour utiliser le rendu natif du terminal.",
       unableToSubscribe: "Impossible de s’abonner au terminal",
       pasteImageFailed: "Impossible de coller l’image",
-      pasteImageDiskFull: "Le disque de l’hôte est plein. Libérez de l’espace et réessayez.",
-      pasteImageQuota:
-        "La limite de stockage des images du terminal est atteinte. Fermez les terminaux inutilisés ou attendez l’expiration des images conservées.",
-      pasteImageClosed: "Ce terminal est fermé. Ouvrez un terminal et réessayez.",
-      pasteImageUnsupported: "Ce programme n’accepte pas le collage de fichiers image.",
-      pasteImageInvalid: "Utilisez une image PNG ou JPEG de moins de 10 Mio.",
       uploadingImage: "Envoi de l’image…",
-      pasteImageUnknown:
-        "L’insertion de l’image n’a pas pu être confirmée. Vérifiez le terminal avant de réessayer.",
     },
     sheet: {
       openAsTab: "Ouvrir dans un onglet",

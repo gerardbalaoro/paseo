@@ -622,16 +622,7 @@ export const ja: TranslationResources = {
       updateHost: "ネイティブターミナルを使用するにはホストを更新してください。",
       unableToSubscribe: "ターミナルに接続できません",
       pasteImageFailed: "画像を貼り付けられませんでした",
-      pasteImageDiskFull:
-        "ホストのディスクがいっぱいです。空き容量を増やしてから再度貼り付けてください。",
-      pasteImageQuota:
-        "ターミナルの画像保存上限に達しました。未使用のターミナルを閉じるか、保存画像の期限切れを待ってください。",
-      pasteImageClosed: "このターミナルは終了しました。ターミナルを開いて再度貼り付けてください。",
-      pasteImageUnsupported: "このプログラムは画像ファイルの貼り付けに対応していません。",
-      pasteImageInvalid: "10 MiB 未満の PNG または JPEG 画像を使用してください。",
       uploadingImage: "画像をアップロード中…",
-      pasteImageUnknown:
-        "画像の挿入を確認できませんでした。再試行する前にターミナルを確認してください。",
     },
     sheet: {
       openAsTab: "タブで開く",

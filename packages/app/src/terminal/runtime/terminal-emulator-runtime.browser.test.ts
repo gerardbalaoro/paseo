@@ -1,16 +1,12 @@
 import { page, userEvent } from "@vitest/browser/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TerminalInputModeState } from "@getpaseo/protocol/terminal-input-mode";
+import type { TerminalImage } from "../image-paste";
 import {
   encodeTerminalOutput,
   TerminalEmulatorRuntime,
   type TerminalClipboard,
 } from "./terminal-emulator-runtime";
-import {
-  encodeTerminalPaste,
-  type TerminalImagePasteInput,
-  type TerminalImagePasteOutcome,
-} from "./terminal-paste";
 
 vi.mock("@xterm/addon-webgl", () => ({
   WebglAddon: class WebglAddon {
@@ -45,13 +41,41 @@ interface MountedTerminal {
   host: HTMLDivElement;
   root: HTMLDivElement;
   runtime: TerminalEmulatorRuntime;
-  clipboard: TerminalClipboard;
   inputs: string[];
   sizes: TerminalSize[];
   terminalKeys: TerminalKeyRecord[];
   inputModeChanges: TerminalInputModeState[];
   openedUrls: string[];
-  images: TerminalImagePasteInput[];
+  clipboard: FakeClipboard;
+  imagePastes: Promise<TerminalImage | null>[];
+}
+
+class FakeClipboard implements TerminalClipboard {
+  text = "";
+  image: { mimeType: string; bytes: number[] } | null = null;
+  imageReads = 0;
+
+  async readText(): Promise<string> {
+    return this.text;
+  }
+
+  async read(): Promise<readonly Pick<ClipboardItem, "types" | "getType">[]> {
+    this.imageReads += 1;
+    const image = this.image;
+    if (!image) {
+      return [];
+    }
+    return [
+      {
+        types: ["text/html", image.mimeType],
+        getType: async (type: string) => new Blob([new Uint8Array(image.bytes)], { type }),
+      },
+    ];
+  }
+
+  async writeText(text: string): Promise<void> {
+    this.text = text;
+  }
 }
 
 const mountedTerminals: MountedTerminal[] = [];
@@ -84,29 +108,11 @@ function settleMountRefits(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 2_600));
 }
 
-function setClipboardImage(
-  clipboard: TerminalClipboard,
-  mimeType = "image/png",
-  bytes = [1, 2, 3],
-): void {
-  Object.assign(clipboard, {
-    readText: async () => "",
-    read: async () => [
-      {
-        types: [mimeType],
-        getType: async (type: string) => new Blob([new Uint8Array(bytes)], { type }),
-      },
-    ],
-  });
-}
-
 interface CreateTerminalHostInput {
   width: number;
   height: number;
   scrollback?: number;
   isMac?: boolean;
-  onImagePaste?: (image: TerminalImagePasteInput) => Promise<TerminalImagePasteOutcome>;
-  onPasteFailure?: () => void;
 }
 
 function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
@@ -126,18 +132,17 @@ function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
 
   const sizes: TerminalSize[] = [];
   const inputs: string[] = [];
-  const images: TerminalImagePasteInput[] = [];
   const terminalKeys: TerminalKeyRecord[] = [];
   const inputModeChanges: TerminalInputModeState[] = [];
   const openedUrls: string[] = [];
-  const clipboard: TerminalClipboard = { readText: async () => "", writeText: async () => {} };
+  const clipboard = new FakeClipboard();
+  const imagePastes: Promise<TerminalImage | null>[] = [];
   const runtime = new TerminalEmulatorRuntime(
     input.isMac === undefined ? undefined : { isMac: input.isMac },
     clipboard,
   );
   runtime.setCallbacks({
     callbacks: {
-      onPasteFailure: input.onPasteFailure,
       onInput: (data) => {
         inputs.push(data);
       },
@@ -153,15 +158,9 @@ function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
       onOpenExternalUrl: (url) => {
         openedUrls.push(url);
       },
-      ...(input.onImagePaste
-        ? {
-            onImagePaste: async (image: TerminalImagePasteInput) => {
-              images.push(image);
-              const outcome = input.onImagePaste ? await input.onImagePaste(image) : "error";
-              return outcome;
-            },
-          }
-        : {}),
+      onImagePaste: (image) => {
+        imagePastes.push(image);
+      },
     },
   });
   runtime.mount({
@@ -180,13 +179,13 @@ function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
     host,
     root,
     runtime,
-    clipboard,
     inputs,
     sizes,
     terminalKeys,
     inputModeChanges,
     openedUrls,
-    images,
+    clipboard,
+    imagePastes,
   };
   mountedTerminals.push(mounted);
   return mounted;
@@ -457,219 +456,76 @@ describe("terminal emulator runtime in a real browser", () => {
     expect(mounted.inputs).toEqual(["legacy renderer paste"]);
   });
 
-  it.each([false, true])(
-    "queued text encoding matches xterm newline semantics (bracketed=%s)",
-    async (bracketedPaste) => {
-      const mounted = createTerminalHost({ width: 720, height: 360 });
-      await waitFor({ predicate: () => mounted.sizes.length > 0 });
-      await new Promise<void>((resolve) =>
-        mounted.runtime.write({
-          data: terminalOutput(bracketedPaste ? "\x1b[?2004h" : "\x1b[?2004l"),
-          onCommitted: resolve,
-        }),
-      );
-      for (const text of ["a\nb", "a\r\nb", "a\rb"]) {
-        const before = mounted.inputs.length;
-        mounted.runtime.paste(text);
-        await waitFor({ predicate: () => mounted.inputs.length > before });
-        expect(encodeTerminalPaste({ text, bracketedPaste })).toBe(mounted.inputs.at(-1));
-      }
-    },
-  );
-
-  it("forwards Ctrl+V to the pty when the clipboard holds no text", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({ width: 720, height: 360 });
-
+  it("pastes clipboard text on Ctrl+V without reading the clipboard image", async () => {
+    const mounted = createTerminalHost({ width: 720, height: 360, isMac: false });
     await waitFor({ predicate: () => mounted.sizes.length > 0 });
-
-    mounted.clipboard.readText = async () => "";
-
-    const inputsBefore = mounted.inputs.length;
-    dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-
-    await waitFor({ predicate: () => mounted.inputs.length > inputsBefore });
-    expect(mounted.inputs.at(-1)).toBe("\x16");
-  });
-
-  it("pastes clipboard text on Ctrl+V without forwarding the keystroke", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({ width: 720, height: 360 });
-
-    await waitFor({ predicate: () => mounted.sizes.length > 0 });
-
-    mounted.clipboard.readText = async () => "clipboard text";
+    mounted.clipboard.text = "clipboard text";
+    mounted.clipboard.image = { mimeType: "image/png", bytes: [1, 2, 3] };
 
     dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
 
-    await waitFor({ predicate: () => mounted.inputs.length > 0 });
+    expect(mounted.imagePastes).toHaveLength(1);
+    await expect(mounted.imagePastes[0]).resolves.toBeNull();
     expect(mounted.inputs).toEqual(["clipboard text"]);
+    expect(mounted.clipboard.imageReads).toBe(0);
   });
 
-  it("pastes clipboard text without consulting onImagePaste", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({
-      width: 720,
-      height: 360,
-      onImagePaste: async () => "written",
-    });
-
+  it("hands the clipboard image to onImagePaste on Ctrl+V when there is no text", async () => {
+    const mounted = createTerminalHost({ width: 720, height: 360, isMac: false });
     await waitFor({ predicate: () => mounted.sizes.length > 0 });
-
-    Object.assign(mounted.clipboard, {
-      readText: async () => "clipboard text",
-      read: async () => [
-        {
-          types: ["image/png"],
-          getType: async (type: string) => new Blob([new Uint8Array([1, 2, 3])], { type }),
-        },
-      ],
-    });
+    mounted.clipboard.image = { mimeType: "image/jpeg", bytes: [1, 2, 3] };
 
     dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
 
-    await waitFor({ predicate: () => mounted.inputs.length > 0 });
-    expect(mounted.inputs).toEqual(["clipboard text"]);
-    await nextFrame();
-    await nextFrame();
-    expect(mounted.images).toEqual([]);
-  });
-
-  it("ships image-only Ctrl+V bytes through onImagePaste and forwards \\x16 when written", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({
-      width: 720,
-      height: 360,
-      onImagePaste: async () => "written",
+    expect(mounted.imagePastes).toHaveLength(1);
+    await expect(mounted.imagePastes[0]).resolves.toEqual({
+      fileName: "clipboard.jpg",
+      mimeType: "image/jpeg",
+      bytes: new Uint8Array([1, 2, 3]),
     });
-
-    await waitFor({ predicate: () => mounted.sizes.length > 0 });
-    setClipboardImage(mounted.clipboard);
-
-    dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-
-    await waitFor({ predicate: () => mounted.images.length > 0 });
-    expect(mounted.images).toEqual([{ data: "AQID", mimeType: "image/png" }]);
-    await waitFor({ predicate: () => mounted.inputs.length > 0 });
-    expect(mounted.inputs).toEqual(["\x16"]);
-  });
-
-  it("forwards nothing when onImagePaste reports an error", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({
-      width: 720,
-      height: 360,
-      onImagePaste: async () => "error",
-    });
-
-    await waitFor({ predicate: () => mounted.sizes.length > 0 });
-    setClipboardImage(mounted.clipboard);
-
-    dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-
-    await waitFor({ predicate: () => mounted.images.length > 0 });
-    await nextFrame();
-    await nextFrame();
     expect(mounted.inputs).toEqual([]);
   });
 
-  it("forwards nothing when onImagePaste reports injected content", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({
-      width: 720,
-      height: 360,
-      onImagePaste: async () => "injected",
-    });
-
+  it("takes image-only paste events at xterm's input before xterm pastes empty text", async () => {
+    const mounted = createTerminalHost({ width: 720, height: 360 });
     await waitFor({ predicate: () => mounted.sizes.length > 0 });
-    setClipboardImage(mounted.clipboard);
-
-    dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-
-    await waitFor({ predicate: () => mounted.images.length > 0 });
-    await nextFrame();
-    await nextFrame();
-    expect(mounted.inputs).toEqual([]);
-  });
-
-  it("forwards \\x16 when the host does not support clipboard images", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({
-      width: 720,
-      height: 360,
-      onImagePaste: async () => "unsupported",
-    });
-
-    await waitFor({ predicate: () => mounted.sizes.length > 0 });
-    setClipboardImage(mounted.clipboard);
-
-    dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-
-    await waitFor({ predicate: () => mounted.images.length > 0 });
-    await waitFor({ predicate: () => mounted.inputs.length > 0 });
-    expect(mounted.inputs).toEqual(["\x16"]);
-  });
-
-  it("falls back to a bare \\x16 when clipboard read fails with a callback present", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({
-      width: 720,
-      height: 360,
-      onImagePaste: async () => "written",
-    });
-
-    await waitFor({ predicate: () => mounted.sizes.length > 0 });
-    Object.assign(mounted.clipboard, {
-      readText: async () => "",
-      read: async () => {
-        throw new Error("denied");
-      },
-    });
-
-    dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-
-    await waitFor({ predicate: () => mounted.inputs.length > 0 });
-    expect(mounted.inputs).toEqual(["\x16"]);
-    expect(mounted.images).toEqual([]);
-  });
-
-  it("ships DOM paste event image bytes through onImagePaste", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({
-      width: 720,
-      height: 360,
-      onImagePaste: async () => "written",
-    });
-
-    await waitFor({ predicate: () => mounted.sizes.length > 0 });
-
     const transfer = new DataTransfer();
     transfer.items.add(new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" }));
+    const event = new ClipboardEvent("paste", {
+      clipboardData: transfer,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    mounted.host.querySelector(".xterm-helper-textarea")!.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(mounted.imagePastes).toHaveLength(1);
+    await expect(mounted.imagePastes[0]).resolves.toEqual({
+      fileName: "shot.png",
+      mimeType: "image/png",
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+    await nextFrame();
+    expect(mounted.inputs).toEqual([]);
+  });
+
+  it("leaves paste events with text to xterm", async () => {
+    const mounted = createTerminalHost({ width: 720, height: 360 });
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    const transfer = new DataTransfer();
+    transfer.setData("text/plain", "echo hi");
+    transfer.items.add(new File([new Uint8Array([1])], "shot.png", { type: "image/png" }));
+
     mounted.host
       .querySelector(".xterm-helper-textarea")!
       .dispatchEvent(
         new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }),
       );
 
-    await waitFor({ predicate: () => mounted.images.length > 0 });
-    expect(mounted.images).toEqual([{ data: "AQID", mimeType: "image/png" }]);
     await waitFor({ predicate: () => mounted.inputs.length > 0 });
-    expect(mounted.inputs).toEqual(["\x16"]);
-  });
-
-  it("forwards \\x16 for image-only DOM paste events", async () => {
-    await page.viewport(900, 600);
-    const mounted = createTerminalHost({ width: 720, height: 360 });
-
-    await waitFor({ predicate: () => mounted.sizes.length > 0 });
-
-    const transfer = new DataTransfer();
-    transfer.items.add(new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" }));
-    const event = new ClipboardEvent("paste", { clipboardData: transfer });
-    mounted.host.dispatchEvent(event);
-
-    await waitFor({ predicate: () => mounted.inputs.length > 0 });
-    expect(mounted.inputs.at(-1)).toBe("\x16");
+    expect(mounted.inputs).toEqual(["echo hi"]);
+    expect(mounted.imagePastes).toEqual([]);
   });
 
   it("refreshes visible rows on a forced same-size resize", async () => {
@@ -938,238 +794,4 @@ describe("terminal emulator runtime in a real browser", () => {
     expect(mounted.openedUrls).toEqual(["https://example.com/plain", "https://example.com/osc8"]);
     expect(confirm).not.toHaveBeenCalled();
   });
-});
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
-it("keeps typing and Enter live while clipboard reading and image upload are pending", async () => {
-  const read = deferred<string>();
-  const upload = deferred<TerminalImagePasteOutcome>();
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: () => upload.promise,
-  });
-  setClipboardImage(mounted.clipboard);
-  mounted.clipboard.readText = () => read.promise;
-  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-  mounted.runtime.inputRaw("describe\r");
-  expect(mounted.inputs).toEqual(["describe\r"]);
-  read.resolve("");
-  await waitFor({ predicate: () => mounted.images.length === 1 });
-  expect(mounted.inputs).toEqual(["describe\r"]);
-  upload.resolve("injected");
-  await waitFor({ predicate: () => mounted.inputs.length > 0 });
-  expect(mounted.inputs).toEqual(["describe\r"]);
-});
-
-it("leaves submitted input unchanged after image upload failure", async () => {
-  const upload = deferred<TerminalImagePasteOutcome>();
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: () => upload.promise,
-  });
-  setClipboardImage(mounted.clipboard);
-  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-  mounted.runtime.inputRaw("describe\r");
-  await waitFor({ predicate: () => mounted.images.length === 1 });
-  upload.resolve("error");
-  await waitFor({ predicate: () => mounted.inputs.length > 0 });
-  expect(mounted.inputs).toEqual(["describe\r"]);
-  mounted.runtime.inputRaw("\r");
-  expect(mounted.inputs).toEqual(["describe\r", "\r"]);
-});
-
-it("keeps clipboard adapters local to each runtime", async () => {
-  const a = createTerminalHost({ width: 720, height: 360 });
-  const b = createTerminalHost({ width: 720, height: 360 });
-  a.clipboard.readText = async () => "first";
-  b.clipboard.readText = async () => "second";
-  dispatchTerminalKey({ host: a.host, key: "v", ctrlKey: true });
-  dispatchTerminalKey({ host: b.host, key: "v", ctrlKey: true });
-  await waitFor({ predicate: () => a.inputs.length > 0 && b.inputs.length > 0 });
-  expect(a.inputs).toEqual(["first"]);
-  expect(b.inputs).toEqual(["second"]);
-});
-
-it("captures consecutive clipboard images at their gestures and uploads in order", async () => {
-  const first = deferred<TerminalImagePasteOutcome>();
-  let calls = 0;
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: () => (++calls === 1 ? first.promise : Promise.resolve("injected")),
-  });
-  setClipboardImage(mounted.clipboard, "image/png", [1]);
-  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-  setClipboardImage(mounted.clipboard, "image/png", [2]);
-  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-  setClipboardImage(mounted.clipboard, "image/png", [3]);
-  mounted.runtime.inputRaw("\r");
-  await waitFor({ predicate: () => mounted.images.length === 1 });
-  expect(mounted.images[0]?.data).toBe("AQ==");
-  first.resolve("injected");
-  await waitFor({ predicate: () => mounted.images.length === 2 });
-  expect(mounted.images.map((image) => image.data)).toEqual(["AQ==", "Ag=="]);
-  expect(mounted.inputs).toEqual(["\r"]);
-});
-
-it("Ctrl+C cancels clipboard reading before any image reaches the host", async () => {
-  const read = deferred<string>();
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: async () => "injected",
-  });
-  setClipboardImage(mounted.clipboard);
-  mounted.clipboard.readText = () => read.promise;
-  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-  mounted.runtime.inputRaw("text\r");
-  mounted.runtime.inputRaw("\x03");
-  read.resolve("");
-  await nextFrame();
-  expect(mounted.inputs).toEqual(["text\r", "\x03"]);
-  expect(mounted.images).toEqual([]);
-});
-
-it("disconnect cancels pending clipboard reads without replay after reconnect", async () => {
-  const read = deferred<string>();
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: async () => "injected",
-  });
-  setClipboardImage(mounted.clipboard);
-  mounted.clipboard.readText = () => read.promise;
-  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-  mounted.runtime.inputRaw("old\r");
-  mounted.runtime.cancelPaste();
-  read.resolve("late clipboard text");
-  await nextFrame();
-  expect(mounted.images).toEqual([]);
-  expect(mounted.inputs).toEqual(["old\r"]);
-  mounted.runtime.inputRaw("new");
-  expect(mounted.inputs).toEqual(["old\r", "new"]);
-});
-
-it("pastes ordinary clipboard text while an earlier image is uploading", async () => {
-  const upload = deferred<TerminalImagePasteOutcome>();
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: () => upload.promise,
-  });
-  setClipboardImage(mounted.clipboard);
-  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-  await waitFor({ predicate: () => mounted.images.length === 1 });
-  mounted.clipboard.readText = async () => "still usable\n";
-  dispatchTerminalKey({ host: mounted.host, key: "v", ctrlKey: true });
-  await waitFor({ predicate: () => mounted.inputs.length === 1 });
-  expect(mounted.inputs).toEqual(["still usable\r"]);
-  upload.resolve("injected");
-});
-
-it("orders multiple and repeated image drops through the clipboard upload callback while typing stays live", async () => {
-  const upload = deferred<TerminalImagePasteOutcome>();
-  let calls = 0;
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: () => (++calls === 1 ? upload.promise : Promise.resolve("injected")),
-  });
-  mounted.runtime.dropImages([
-    new File([new Uint8Array([1])], "one.png", { type: "image/png" }),
-    new File([new Uint8Array([2])], "two.jpeg"),
-  ]);
-  mounted.runtime.dropImages([new File([new Uint8Array([3])], "three.png", { type: "image/png" })]);
-  await waitFor({ predicate: () => mounted.images.length === 1 });
-  mounted.runtime.inputRaw("describe\r");
-  expect(mounted.inputs).toEqual(["describe\r"]);
-  upload.resolve("injected");
-  await waitFor({ predicate: () => mounted.images.length === 3 });
-  expect(mounted.images).toEqual([
-    { data: "AQ==", mimeType: "image/png" },
-    { data: "Ag==", mimeType: "image/jpeg" },
-    { data: "Aw==", mimeType: "image/png" },
-  ]);
-  expect(mounted.inputs).toEqual(["describe\r"]);
-});
-
-it("cancels a drop during file reading and discards queued images without touching input", async () => {
-  const read = deferred<ArrayBuffer>();
-  let reading = false;
-  class DelayedFile extends File {
-    override arrayBuffer(): Promise<ArrayBuffer> {
-      reading = true;
-      return read.promise;
-    }
-  }
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: async () => "injected",
-  });
-  mounted.runtime.dropImages([
-    new DelayedFile(["one"], "one.png", { type: "image/png" }),
-    new File(["two"], "two.png", { type: "image/png" }),
-  ]);
-  await waitFor({ predicate: () => reading });
-  mounted.runtime.inputRaw("\x03");
-  read.resolve(new Uint8Array([1]).buffer);
-  await nextFrame();
-  expect(mounted.images).toEqual([]);
-  expect(mounted.inputs).toEqual(["\x03"]);
-});
-
-it("reports unsupported or unreadable dropped images without host clipboard or local path fallback", async () => {
-  let failures = 0;
-  class UnreadableFile extends File {
-    override async arrayBuffer(): Promise<ArrayBuffer> {
-      throw new Error("Cannot read private path");
-    }
-  }
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: async () => "unsupported",
-    onPasteFailure: () => {
-      failures += 1;
-    },
-  });
-  mounted.runtime.dropImages([
-    new File(["gif"], "one.gif", { type: "image/gif" }),
-    new UnreadableFile(["png"], "two.png", { type: "image/png" }),
-    new File([new Uint8Array([1])], "three.png", { type: "image/png" }),
-  ]);
-  await waitFor({ predicate: () => failures === 3 });
-  expect(mounted.images).toEqual([{ data: "AQ==", mimeType: "image/png" }]);
-  expect(mounted.inputs).toEqual([]);
-});
-
-it("continues image drops after an upload failure and preserves already submitted input", async () => {
-  let failures = 0;
-  let calls = 0;
-  const mounted = createTerminalHost({
-    width: 720,
-    height: 360,
-    onImagePaste: async () => (++calls === 1 ? "error" : "injected"),
-    onPasteFailure: () => {
-      failures += 1;
-    },
-  });
-  mounted.runtime.dropImages([
-    new File(["one"], "one.png", { type: "image/png" }),
-    new File(["two"], "two.png", { type: "image/png" }),
-  ]);
-  mounted.runtime.inputRaw("\r");
-  await waitFor({ predicate: () => mounted.images.length === 2 });
-  expect(failures).toBe(1);
-  expect(mounted.inputs).toEqual(["\r"]);
 });

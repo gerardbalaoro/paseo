@@ -545,13 +545,6 @@ function NativeTerminalEmulator({
           }),
         );
       },
-      inputRaw: (data: string) => {
-        if (data.length === 0) {
-          return;
-        }
-        claimActiveTerminalSizeForAction("paste");
-        callbacksRef.current.onInput?.(data);
-      },
       copySelection: async (clipboard: TerminalClipboardWriter): Promise<string> => {
         const terminal = terminalRef.current;
         if (!terminal) {

@@ -1,5 +1,3 @@
-import { terminalDropImageMimeType } from "../drop/terminal-file-drop";
-import { TerminalPasteQueue } from "@getpaseo/protocol/terminal-paste-queue";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
@@ -35,11 +33,7 @@ import {
 import { isFindShortcut, type FindShortcutPlatform } from "@/pane-find/find-shortcut";
 import { isMacUserAgent } from "@/utils/mac-user-agent";
 import { resolveTerminalFontFamily, resolveTerminalFontSize } from "./terminal-font";
-import {
-  TERMINAL_IMAGE_PASTE_KEYSTROKE,
-  type TerminalImagePasteInput,
-  type TerminalImagePasteOutcome,
-} from "./terminal-paste";
+import { imageExtension, readTerminalImageFile, type TerminalImage } from "../image-paste";
 
 export type TerminalOutputData = Uint8Array;
 
@@ -90,8 +84,8 @@ export interface TerminalEmulatorRuntimeCallbacks {
     disposition: "main" | "side",
   ) => Promise<void> | void;
   onInputModeChange?: (state: TerminalInputModeState) => Promise<void> | void;
-  onImagePaste?: (input: TerminalImagePasteInput) => Promise<TerminalImagePasteOutcome>;
-  onPasteFailure?: () => void;
+  /** A paste or drop gesture that can carry an image; resolves to null when it carried none. */
+  onImagePaste?: (image: Promise<TerminalImage | null>) => void;
 }
 
 export interface TerminalResizeEvent {
@@ -131,7 +125,7 @@ interface TerminalEmulatorRuntimeDisposables {
   clearFitTimeouts: () => void;
   removeFontListeners: () => void;
   removeTouchListeners: () => void;
-  removeHostPaste: () => void;
+  removeImagePasteListener: () => void;
   restoreDocumentStyles: () => void;
   restoreViewportStyles: () => void;
   disposeFitAddon: () => void;
@@ -190,42 +184,9 @@ function withOverviewRulerBorderHidden(theme: ITheme): ITheme {
   };
 }
 
-const CLIPBOARD_IMAGE_MIME_TYPES = ["image/png", "image/jpeg"] as const;
-const BASE64_CHUNK_SIZE = 0x8000;
-
-function encodeBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_SIZE) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + BASE64_CHUNK_SIZE));
-  }
-  return btoa(binary);
-}
-
-async function readClipboardImageFromTransfer(
-  transfer: DataTransfer,
-): Promise<TerminalImagePasteInput | null> {
-  for (const item of Array.from(transfer.items)) {
-    const mimeType = CLIPBOARD_IMAGE_MIME_TYPES.find((type) => item.type === type);
-    if (!mimeType) {
-      continue;
-    }
-    const file = item.getAsFile();
-    if (!file) {
-      continue;
-    }
-    try {
-      const data = encodeBase64(new Uint8Array(await file.arrayBuffer()));
-      return { data, mimeType };
-    } catch {
-      // Unreadable entry; keep looking at the remaining items.
-    }
-  }
-  return null;
-}
-
 export interface TerminalClipboard {
   readText(): Promise<string>;
-  read?(): Promise<readonly Pick<ClipboardItem, "types" | "getType">[]>;
+  read(): Promise<readonly Pick<ClipboardItem, "types" | "getType">[]>;
   writeText(text: string): Promise<void>;
 }
 
@@ -235,31 +196,29 @@ const browserClipboard: TerminalClipboard = {
   writeText: (text) => navigator.clipboard.writeText(text),
 };
 
-async function readClipboardImageFromNavigator(
-  clipboard: TerminalClipboard,
-): Promise<TerminalImagePasteInput | null> {
-  if (!clipboard || typeof clipboard.read !== "function") {
+async function readClipboardImage(clipboard: TerminalClipboard): Promise<TerminalImage | null> {
+  for (const item of await clipboard.read()) {
+    const mimeType = item.types.find((type) => type.startsWith("image/"));
+    if (mimeType) {
+      const blob = await item.getType(mimeType);
+      return {
+        fileName: `clipboard.${imageExtension(mimeType)}`,
+        mimeType,
+        bytes: new Uint8Array(await blob.arrayBuffer()),
+      };
+    }
+  }
+  return null;
+}
+
+/** The image of a paste that carries no text. xterm would paste it as empty text. */
+function findImageOnlyPaste(transfer: DataTransfer | null): File | null {
+  if (!transfer || transfer.getData("text/plain").length > 0) {
     return null;
   }
-  let items: readonly Pick<ClipboardItem, "types" | "getType">[];
-  try {
-    items = await clipboard.read();
-  } catch {
-    // Reading the full clipboard can be permission-gated; treat as no image.
-    return null;
-  }
-  for (const item of items) {
-    for (const mimeType of CLIPBOARD_IMAGE_MIME_TYPES) {
-      if (!item.types.includes(mimeType)) {
-        continue;
-      }
-      try {
-        const blob = await item.getType(mimeType);
-        const data = encodeBase64(new Uint8Array(await blob.arrayBuffer()));
-        return { data, mimeType };
-      } catch {
-        // Try the next supported mime type on this representation.
-      }
+  for (const item of Array.from(transfer.items)) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      return item.getAsFile();
     }
   }
   return null;
@@ -271,11 +230,7 @@ export class TerminalEmulatorRuntime {
     private readonly clipboard: TerminalClipboard = browserClipboard,
   ) {}
 
-  private clipboardReadGeneration = 0;
   private callbacks: TerminalEmulatorRuntimeCallbacks = {};
-  private readonly pasteQueue = new TerminalPasteQueue({
-    onFailure: () => this.callbacks.onPasteFailure?.(),
-  });
   private pendingModifiers: PendingTerminalModifiers = {
     ctrl: false,
     shift: false,
@@ -423,10 +378,10 @@ export class TerminalEmulatorRuntime {
           return false;
         }
 
-        // Ctrl+V: paste text or forward clipboard images to the host daemon.
+        // Ctrl+V: paste clipboard text, or the clipboard image when there is no text
         if (key === "v") {
           event.preventDefault();
-          void this.pasteClipboardTextOrImage(terminal);
+          this.pasteClipboard(terminal);
           return false;
         }
 
@@ -464,12 +419,9 @@ export class TerminalEmulatorRuntime {
         altKey: event.altKey,
         metaKey: event.metaKey,
       });
-      if (normalizedKey.toLowerCase() === "c" && modifiers.ctrl) this.pasteQueue.cancel();
-      this.pasteQueue.action(() => {
-        void this.callbacks.onTerminalKey?.({
-          key: normalizeTerminalTransportKey(normalizedKey),
-          ...modifiers,
-        });
+      this.callbacks.onTerminalKey?.({
+        key: normalizeTerminalTransportKey(normalizedKey),
+        ...modifiers,
       });
 
       if (hasPendingTerminalModifiers(this.pendingModifiers)) {
@@ -751,42 +703,24 @@ export class TerminalEmulatorRuntime {
       if (this.suppressInput) {
         return;
       }
-      this.pasteQueue.input(data, (value) => {
-        void this.callbacks.onInput?.(value);
-      });
+      this.callbacks.onInput?.(data);
     });
 
     this.attachKeyEventHandler(terminal);
 
-    // macOS Cmd+V and context-menu paste arrive as DOM paste events, not keydowns.
-    // Let xterm handle text. Intercept image-only pastes before its bubbling
-    // listener consumes them as empty text and stops propagation.
-    const hostPasteHandler = (event: ClipboardEvent): void => {
-      const transfer = event.clipboardData;
-      if (!transfer) {
-        return;
-      }
-      if (transfer.getData("text/plain").length > 0) {
-        return;
-      }
-      const hasImage = Array.from(transfer.items).some((item) => item.type.startsWith("image/"));
-      if (!hasImage) {
+    // Cmd+V and context-menu paste arrive as DOM paste events. Take image-only
+    // pastes before xterm's own listener consumes them as empty text.
+    const imagePasteHandler = (event: ClipboardEvent): void => {
+      const onImagePaste = this.callbacks.onImagePaste;
+      const file = findImageOnlyPaste(event.clipboardData);
+      if (!onImagePaste || !file) {
         return;
       }
       event.preventDefault();
       event.stopPropagation();
-      const image = readClipboardImageFromTransfer(transfer);
-      void this.pasteQueue.paste((signal) =>
-        this.forwardClipboardImage({
-          readImage: () => image,
-          input: (data) => {
-            void this.callbacks.onInput?.(data);
-          },
-          signal,
-        }),
-      );
+      onImagePaste(readTerminalImageFile(file));
     };
-    input.host.addEventListener("paste", hostPasteHandler, true);
+    input.host.addEventListener("paste", imagePasteHandler, true);
 
     const removeTouchListeners = this.setupTouchScrollHandlers({
       root: input.root,
@@ -877,8 +811,8 @@ export class TerminalEmulatorRuntime {
         fontSet?.removeEventListener?.("loadingdone", fontReadyHandler);
       },
       removeTouchListeners,
-      removeHostPaste: () => {
-        input.host.removeEventListener("paste", hostPasteHandler, true);
+      removeImagePasteListener: () => {
+        input.host.removeEventListener("paste", imagePasteHandler, true);
       },
       restoreDocumentStyles,
       restoreViewportStyles,
@@ -909,7 +843,7 @@ export class TerminalEmulatorRuntime {
       disposables.clearFitTimeouts();
       disposables.removeFontListeners();
       disposables.removeTouchListeners();
-      disposables.removeHostPaste();
+      disposables.removeImagePasteListener();
       disposables.disposeFitAddon();
       disposables.disposeWebglAddon();
       disposables.disposeTerminal();
@@ -950,90 +884,18 @@ export class TerminalEmulatorRuntime {
     this.terminal?.paste(text);
   }
 
-  /** Feeds raw bytes (e.g. the \x16 image-paste keystroke) directly into xterm. */
-  cancelPaste(): void {
-    this.clipboardReadGeneration += 1;
-    this.pasteQueue.dispose();
-  }
-
-  inputRaw(data: string): void {
-    if (data.length === 0) {
-      return;
-    }
-    this.terminal?.input(data);
-  }
-
-  private async pasteClipboardTextOrImage(terminal: Pick<Terminal, "paste">): Promise<void> {
-    // Capture each gesture now, even when an earlier image is still uploading.
-    const generation = this.clipboardReadGeneration;
-    const readText = (async () => this.clipboard.readText())()
-      .catch(() => "")
-      .then((text) => {
-        if (text && this.terminal === terminal && generation === this.clipboardReadGeneration)
-          terminal.paste(text);
-        return text;
-      });
-    const readImage = this.callbacks.onImagePaste
-      ? readClipboardImageFromNavigator(this.clipboard)
-      : Promise.resolve(null);
-    await this.pasteQueue.paste(async (signal) => {
-      const text = await readText;
-      if (signal.aborted) return false;
-      if (text.length > 0) return true;
-      return this.forwardClipboardImage({
-        readImage: () => readImage,
-        input: (data) => {
-          void this.callbacks.onInput?.(data);
-        },
-        signal,
-      });
-    });
-  }
-
-  /** Dropped images share clipboard upload ordering, cancellation and error reporting.
-   * A drop must never fall back to reading the host clipboard or inserting a client path.
-   */
-  dropImages(files: readonly File[]): void {
-    for (const file of files) {
-      void this.pasteQueue.paste((signal) =>
-        this.forwardClipboardImage({
-          readImage: async () => {
-            const mimeType = terminalDropImageMimeType(file);
-            if (!mimeType || file.size > 10 * 1024 * 1024) return null;
-            const data = encodeBase64(new Uint8Array(await file.arrayBuffer()));
-            return { data, mimeType };
-          },
-          input: (data) => {
-            void this.callbacks.onInput?.(data);
-          },
-          signal,
-          allowClipboardFallback: false,
-        }),
-      );
-    }
-  }
-
-  private async forwardClipboardImage(input: {
-    readImage: () => Promise<TerminalImagePasteInput | null>;
-    input: (data: string) => void;
-    signal: AbortSignal;
-    allowClipboardFallback?: boolean;
-  }): Promise<boolean> {
+  private pasteClipboard(terminal: Pick<Terminal, "paste">): void {
+    const text = this.clipboard.readText().catch(() => "");
     const onImagePaste = this.callbacks.onImagePaste;
-    const image = onImagePaste ? await input.readImage().catch(() => null) : null;
-    if (input.signal.aborted) return false;
-    if (!onImagePaste || !image) {
-      if (input.allowClipboardFallback === false) return false;
-      input.input(TERMINAL_IMAGE_PASTE_KEYSTROKE);
-      return true;
-    }
-    const outcome = await onImagePaste(image).catch(() => "error" as const);
-    if (input.signal.aborted && outcome !== "injected") return false;
-    if (outcome === "written" || outcome === "unsupported") {
-      if (input.allowClipboardFallback === false) return false;
-      input.input(TERMINAL_IMAGE_PASTE_KEYSTROKE);
-    }
-    return outcome !== "error";
+    // Report the gesture now so it keeps its place among earlier image pastes.
+    const image = text.then((value) => {
+      if (value) {
+        terminal.paste(value);
+        return null;
+      }
+      return onImagePaste ? readClipboardImage(this.clipboard).catch(() => null) : null;
+    });
+    onImagePaste?.(image);
   }
 
   renderSnapshot(input: { state: TerminalState | null; onCommitted?: () => void }): void {
@@ -1170,7 +1032,6 @@ export class TerminalEmulatorRuntime {
   }
 
   unmount(): void {
-    this.cancelPaste();
     this.releaseFindOutputAnchor();
     this.clearInFlightOutputTimeout();
     const inFlightOperation = this.inFlightOutputOperation;

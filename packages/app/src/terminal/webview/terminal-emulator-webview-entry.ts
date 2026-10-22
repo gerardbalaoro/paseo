@@ -12,11 +12,7 @@ import type {
   TerminalLocalFileLinkSource,
   TerminalLocalFileLinkTarget,
 } from "../local-links/terminal-local-link-provider";
-import type {
-  TerminalImagePasteInput,
-  TerminalImagePasteMimeType,
-  TerminalImagePasteOutcome,
-} from "../runtime/terminal-paste";
+import { terminalImageToBase64, type TerminalImage } from "../image-paste";
 
 interface MountMessage {
   type: "mount";
@@ -53,30 +49,14 @@ type InboundMessage =
       streamKey: string;
       requestId: number;
       target: TerminalLocalFileLinkTarget | null;
-    }
-  | { type: "rawInput"; streamKey: string; data: string }
-  | { type: "cancelPaste"; streamKey: string }
-  | {
-      type: "imagePasteResult";
-      streamKey: string;
-      requestId: number;
-      outcome: TerminalImagePasteOutcome;
     };
 
 type OutboundMessage =
   | { type: "bridgeReady" }
   | { type: "rendererReady"; streamKey: string; isReady: boolean }
   | { type: "input"; streamKey: string; data: string }
-  | { type: "pasteFailure"; streamKey: string }
   | { type: "findRequest"; streamKey: string }
   | { type: "findResult"; streamKey: string; result: TerminalFindResult }
-  | {
-      type: "imagePaste";
-      streamKey: string;
-      requestId: number;
-      data: string;
-      mimeType: TerminalImagePasteMimeType;
-    }
   | {
       type: "resize";
       streamKey: string;
@@ -97,6 +77,7 @@ type OutboundMessage =
   | { type: "pendingModifiersConsumed"; streamKey: string }
   | { type: "inputModeChange"; streamKey: string; state: TerminalInputModeState }
   | { type: "openExternalUrl"; streamKey: string; url: string }
+  | { type: "imagePaste"; streamKey: string; fileName: string; mimeType: string; data: string }
   | {
       type: "resolveLocalFileLink";
       streamKey: string;
@@ -203,11 +184,7 @@ class TerminalWebViewBridge {
     number,
     (target: TerminalLocalFileLinkTarget | null) => void
   >();
-  private nextImagePasteRequestId = 1;
-  private readonly pendingImagePasteResolutions = new Map<
-    number,
-    (outcome: TerminalImagePasteOutcome) => void
-  >();
+  private imagePastes: Promise<void> = Promise.resolve();
   private swipeGesturesEnabled = false;
   private trackingSwipe = false;
   private activePointerId: number | null = null;
@@ -276,33 +253,13 @@ class TerminalWebViewBridge {
     this.receiveMounted(message);
   }
 
-  private receivePasteMessage(message: InboundMessage): boolean {
-    switch (message.type) {
-      case "paste":
-        this.runtime?.paste(message.text);
-        return true;
-      case "cancelPaste":
-        this.runtime?.cancelPaste();
-        this.resolveAllImagePasteRequests("error");
-        return true;
-      case "rawInput":
-        this.runtime?.inputRaw(message.data);
-        return true;
-      case "imagePasteResult":
-        this.resolveImagePasteRequest(message.requestId, message.outcome);
-        return true;
-      default:
-        return false;
-    }
-  }
-
   private receiveMounted(
     message: Exclude<
       InboundMessage,
       MountMessage | { type: "unmount" } | { type: "resolveLocalFileLinkResponse" }
     >,
   ): void {
-    if (this.receiveConfigurationMessage(message) || this.receivePasteMessage(message)) return;
+    if (this.receiveConfigurationMessage(message)) return;
 
     switch (message.type) {
       case "writeOutput":
@@ -313,6 +270,9 @@ class TerminalWebViewBridge {
         break;
       case "renderSnapshot":
         this.runtime?.renderSnapshot({ state: message.state });
+        break;
+      case "paste":
+        this.runtime?.paste(message.text);
         break;
       case "clear":
         this.runtime?.clear();
@@ -371,8 +331,6 @@ class TerminalWebViewBridge {
         onFindResult: (result) =>
           sendToNative({ type: "findResult", streamKey: message.streamKey, result }),
         onInput: (data) => sendToNative({ type: "input", streamKey: message.streamKey, data }),
-        onImagePaste: (input) => this.requestImagePaste(message.streamKey, input),
-        onPasteFailure: () => sendToNative({ type: "pasteFailure", streamKey: message.streamKey }),
         onResize: ({ rows, cols, shouldClaim, forceClaim }) =>
           sendToNative({
             type: "resize",
@@ -398,6 +356,7 @@ class TerminalWebViewBridge {
             target,
             disposition,
           }),
+        onImagePaste: (image) => this.forwardImagePaste(message.streamKey, image),
       },
     });
     runtime.setPendingModifiers({ pendingModifiers: message.pendingModifiers });
@@ -434,9 +393,29 @@ class TerminalWebViewBridge {
     this.runtime = null;
     this.streamKey = null;
     this.resolveAllLocalFileLinkRequests(null);
-    this.resolveAllImagePasteRequests("error");
     if (previousStreamKey && (!streamKey || streamKey === previousStreamKey)) {
       sendToNative({ type: "rendererReady", streamKey: previousStreamKey, isReady: false });
+    }
+  }
+
+  // Forward in gesture order: an earlier image can finish reading after a later one.
+  private forwardImagePaste(streamKey: string, image: Promise<TerminalImage | null>): void {
+    this.imagePastes = this.imagePastes.then(() => this.sendImagePaste(streamKey, image));
+  }
+
+  private async sendImagePaste(
+    streamKey: string,
+    image: Promise<TerminalImage | null>,
+  ): Promise<void> {
+    const read = await image.catch(() => null);
+    if (read && this.matches(streamKey)) {
+      sendToNative({
+        type: "imagePaste",
+        streamKey,
+        fileName: read.fileName,
+        mimeType: read.mimeType,
+        data: terminalImageToBase64(read),
+      });
     }
   }
 
@@ -481,41 +460,6 @@ class TerminalWebViewBridge {
     this.pendingLocalFileLinkResolutions.clear();
     for (const resolve of requests) {
       resolve(target);
-    }
-  }
-
-  private requestImagePaste(
-    streamKey: string,
-    input: TerminalImagePasteInput,
-  ): Promise<TerminalImagePasteOutcome> {
-    const requestId = this.nextImagePasteRequestId++;
-    const timer = setTimeout(() => this.resolveImagePasteRequest(requestId, "error"), 30_000);
-    return new Promise<TerminalImagePasteOutcome>((resolve) => {
-      this.pendingImagePasteResolutions.set(requestId, resolve);
-      sendToNative({
-        type: "imagePaste",
-        streamKey,
-        requestId,
-        data: input.data,
-        mimeType: input.mimeType,
-      });
-    }).finally(() => clearTimeout(timer));
-  }
-
-  private resolveImagePasteRequest(requestId: number, outcome: TerminalImagePasteOutcome): void {
-    const resolve = this.pendingImagePasteResolutions.get(requestId);
-    if (!resolve) {
-      return;
-    }
-    this.pendingImagePasteResolutions.delete(requestId);
-    resolve(outcome);
-  }
-
-  private resolveAllImagePasteRequests(outcome: TerminalImagePasteOutcome): void {
-    const requests = Array.from(this.pendingImagePasteResolutions.values());
-    this.pendingImagePasteResolutions.clear();
-    for (const resolve of requests) {
-      resolve(outcome);
     }
   }
 
