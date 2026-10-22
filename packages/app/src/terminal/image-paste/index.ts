@@ -1,4 +1,5 @@
 import { FILE_UPLOAD_MAX_BYTES } from "@/attachments/upload-limit";
+import { i18n } from "@/i18n/i18next";
 import { prepareTerminalPath } from "../drop/terminal-file-drop";
 
 /** Image bytes from a paste or drop gesture, before they become a file on the host. */
@@ -16,8 +17,9 @@ export interface TerminalImagePasteTarget {
 }
 
 interface TerminalImagePasteEvents {
-  onFailure(): void;
   onUploadingChange(uploading: boolean): void;
+  onUploaded(): void;
+  onFailure(error: unknown): void;
 }
 
 /**
@@ -62,16 +64,19 @@ export class TerminalImagePasteQueue {
         return;
       }
       if (image.bytes.byteLength > FILE_UPLOAD_MAX_BYTES) {
-        throw new Error("Image exceeds the upload limit");
+        throw new Error(
+          i18n.t("composer.errors.fileTooLarge", { size: "50MB", fileName: image.fileName }),
+        );
       }
       this.setUploading(true);
       const path = await target.upload({ ...image, fileName: toShellSafeFileName(image.fileName) });
       if (isCurrent()) {
         target.paste(prepareTerminalPath(path));
+        this.events.onUploaded();
       }
-    } catch {
+    } catch (error) {
       if (isCurrent()) {
-        this.events.onFailure();
+        this.events.onFailure(error);
       }
     } finally {
       if (isCurrent()) {

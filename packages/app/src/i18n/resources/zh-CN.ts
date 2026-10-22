@@ -615,7 +615,8 @@ export const zhCN: TranslationResources = {
       hostDisconnected: "Host 未连接",
       updateHost: "请更新主机以使用原生终端渲染器。",
       unableToSubscribe: "无法订阅 Terminal",
-      pasteImageFailed: "无法粘贴图片",
+      imageUploaded: "图片已上传",
+      pasteImageFailed: "无法粘贴图片：{{reason}}",
       uploadingImage: "正在上传图片…",
     },
     sheet: {

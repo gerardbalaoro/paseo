@@ -46,13 +46,16 @@ class FakeHost implements TerminalImagePasteTarget {
 }
 
 function createQueue() {
-  const events = { failures: 0, uploading: [] as boolean[] };
+  const events = { uploading: [] as boolean[], uploaded: 0, failures: [] as string[] };
   const queue = new TerminalImagePasteQueue({
-    onFailure: () => {
-      events.failures += 1;
-    },
     onUploadingChange: (uploading) => {
       events.uploading.push(uploading);
+    },
+    onUploaded: () => {
+      events.uploaded += 1;
+    },
+    onFailure: (error) => {
+      events.failures.push(error instanceof Error ? error.message : String(error));
     },
   });
   return { queue, events, host: new FakeHost() };
@@ -76,7 +79,7 @@ describe("terminal image paste queue", () => {
     firstUpload.resolve("/host/uploads/a.png");
     await settle();
     expect(host.pasted).toEqual(["'/host/uploads/a.png'", "'/host/uploads/b.png'"]);
-    expect(events).toEqual({ failures: 0, uploading: [true, false, true, false] });
+    expect(events).toEqual({ uploading: [true, false, true, false], uploaded: 2, failures: [] });
   });
 
   it("quotes Windows host paths for the host shell", async () => {
@@ -108,7 +111,7 @@ describe("terminal image paste queue", () => {
 
     expect(host.uploads).toEqual([]);
     expect(host.pasted).toEqual([]);
-    expect(events).toEqual({ failures: 0, uploading: [] });
+    expect(events).toEqual({ uploading: [], uploaded: 0, failures: [] });
   });
 
   it("reports a failed upload and keeps pasting later images", async () => {
@@ -119,7 +122,8 @@ describe("terminal image paste queue", () => {
     queue.add(Promise.resolve(image("b.png")), host);
     await settle();
 
-    expect(events.failures).toBe(1);
+    expect(events.failures).toEqual(["disk full"]);
+    expect(events.uploaded).toBe(1);
     expect(host.pasted).toEqual(["'/host/uploads/b.png'"]);
   });
 
@@ -134,7 +138,7 @@ describe("terminal image paste queue", () => {
     queue.add(Promise.resolve(oversized), host);
     await settle();
 
-    expect(events.failures).toBe(2);
+    expect(events.failures).toEqual(["unreadable", "big.png is too large (max 50MB)"]);
     expect(host.uploads).toEqual([]);
   });
 
@@ -152,7 +156,8 @@ describe("terminal image paste queue", () => {
     await settle();
     expect(host.pasted).toEqual([]);
     expect(host.uploads.map((entry) => entry.fileName)).toEqual(["a.png"]);
-    expect(events.failures).toBe(0);
+    expect(events.failures).toEqual([]);
+    expect(events.uploaded).toBe(0);
   });
 
   it("does not hold new pastes behind a cancelled upload that never settles", async () => {

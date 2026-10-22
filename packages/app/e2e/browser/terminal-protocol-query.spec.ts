@@ -219,6 +219,7 @@ test.describe("Terminal protocol queries", () => {
         output.indexOf(imageRead(pngBytes(5))),
       );
       await expect(page.getByTestId("terminal-image-uploading")).toHaveCount(0);
+      await expect(page.getByTestId("app-toast-message")).toHaveText("Image uploaded");
     } finally {
       await harness.killTerminal(terminal.id);
     }
@@ -254,7 +255,9 @@ test.describe("Terminal protocol queries", () => {
       await upload.waitUntilHeld();
 
       await upload.disconnect();
-      await expect(page.getByTestId("app-toast-message")).toHaveText("Failed to paste image");
+      await expect(page.getByTestId("app-toast-message")).toHaveText(
+        "Failed to paste image: Host is not connected",
+      );
 
       await typeLine(page, "after");
       await expectTerminalOutput(terminal.id, "TYPED:after");

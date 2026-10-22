@@ -615,7 +615,8 @@ export const ar: TranslationResources = {
       hostDisconnected: "Host غير متصل",
       updateHost: "حدّث المضيف لاستخدام عارض الطرفية الأصلي.",
       unableToSubscribe: "غير قادر على الاشتراك في المحطة",
-      pasteImageFailed: "تعذر لصق الصورة",
+      imageUploaded: "تم رفع الصورة",
+      pasteImageFailed: "تعذر لصق الصورة: {{reason}}",
       uploadingImage: "جارٍ رفع الصورة…",
     },
     sheet: {

@@ -622,7 +622,8 @@ export const ru: TranslationResources = {
       hostDisconnected: "Хост не подключён",
       updateHost: "Обновите хост, чтобы использовать нативный рендерер терминала.",
       unableToSubscribe: "Не удалось подключиться к терминалу",
-      pasteImageFailed: "Не удалось вставить изображение",
+      imageUploaded: "Изображение загружено",
+      pasteImageFailed: "Не удалось вставить изображение: {{reason}}",
       uploadingImage: "Загрузка изображения…",
     },
     sheet: {

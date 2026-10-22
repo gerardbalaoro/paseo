@@ -50,6 +50,8 @@ import {
   type TerminalImage,
 } from "@/terminal/image-paste";
 import { useToast } from "@/contexts/toast-context";
+import type { DismissToast } from "@/components/toast-host";
+import { toErrorMessage } from "@/utils/error-messages";
 import { getWorkspaceTerminalSession } from "@/terminal/runtime/workspace-terminal-session";
 import {
   EMPTY_FOCUS_CLAIM_STATE,
@@ -311,27 +313,40 @@ export function TerminalPane({
   const [hasSelection, setHasSelection] = useState(false);
   const [hasClipboardText, setHasClipboardText] = useState(false);
   const [hasClipboardImage, setHasClipboardImage] = useState(false);
-  const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [isKeyboardToggleVisible, setIsKeyboardToggleVisible] = useState(false);
   const [focusRequestToken, setFocusRequestToken] = useState(0);
   const [resizeRequestToken, setResizeRequestToken] = useState(0);
   const toast = useToast();
-  const reportImagePasteFailure = useStableEvent(() => {
-    toast.error(t("workspace.terminal.pasteImageFailed"));
+  const dismissUploadingToastRef = useRef<DismissToast | null>(null);
+  const showImageUploading = useStableEvent((uploading: boolean) => {
+    dismissUploadingToastRef.current?.();
+    dismissUploadingToastRef.current = uploading
+      ? toast.show(t("workspace.terminal.uploadingImage"), {
+          durationMs: null,
+          testID: "terminal-image-uploading",
+        })
+      : null;
+  });
+  const reportImageUploaded = useStableEvent(() => {
+    toast.show(t("workspace.terminal.imageUploaded"), { variant: "success" });
+  });
+  const reportImagePasteFailure = useStableEvent((error: unknown) => {
+    toast.error(t("workspace.terminal.pasteImageFailed", { reason: toErrorMessage(error) }));
   });
   const [imagePastes] = useState(
     () =>
       new TerminalImagePasteQueue({
+        onUploadingChange: showImageUploading,
+        onUploaded: reportImageUploaded,
         onFailure: reportImagePasteFailure,
-        onUploadingChange: setIsUploadingImage,
       }),
   );
   useEffect(() => () => void imagePastes.cancel(), [imagePastes, terminalStreamKey]);
   useEffect(() => {
     if (!isConnected && imagePastes.cancel()) {
-      reportImagePasteFailure();
+      reportImagePasteFailure(new Error(t("workspace.terminal.hostDisconnected")));
     }
-  }, [imagePastes, isConnected, reportImagePasteFailure]);
+  }, [imagePastes, isConnected, reportImagePasteFailure, t]);
   useBlockMobilePanelOpenGestures(isMobile && isWorkspaceFocused && isPaneFocused && hasSelection);
   const emulatorRef = useRef<TerminalEmulatorHandle>(null);
   const findRef = useRef<TerminalPaneFindHandle>(null);
@@ -1193,16 +1208,6 @@ export function TerminalPane({
           focusTerminal={requestTerminalFocus}
         />
 
-        {isUploadingImage ? (
-          <View
-            pointerEvents="none"
-            style={styles.imageUploadStatus}
-            testID="terminal-image-uploading"
-          >
-            <Text style={styles.imageUploadText}>{t("workspace.terminal.uploadingImage")}</Text>
-          </View>
-        ) : null}
-
         {showLoadingOverlay ? (
           <View style={styles.attachOverlay} pointerEvents="none" testID="terminal-attach-loading">
             <LoadingSpinner size="small" color={theme.colors.foregroundMuted} />
@@ -1261,18 +1266,6 @@ const styles = StyleSheet.create((theme) => ({
   terminalGestureContainer: {
     flex: 1,
     minHeight: 0,
-  },
-  imageUploadStatus: {
-    position: "absolute",
-    top: theme.spacing[2],
-    right: theme.spacing[2],
-    padding: theme.spacing[1],
-    borderRadius: theme.borderRadius.sm,
-    backgroundColor: theme.colors.surface1,
-  },
-  imageUploadText: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
   },
   attachOverlay: {
     ...StyleSheet.absoluteFill,
